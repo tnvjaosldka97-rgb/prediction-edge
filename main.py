@@ -432,7 +432,7 @@ async def main():
 
     # WebSocket real-time orderbook (requires aiohttp connection)
     try:
-        ws_tasks = await start_websocket_manager(store, orderbook_bus)
+        ws_tasks = await start_websocket_manager(store, orderbook_bus, signal_bus=raw_signal_bus)
         tasks.extend(ws_tasks)
         log.info(f"WebSocket: {len(ws_tasks)} connection(s) started")
     except Exception as e:
@@ -448,12 +448,13 @@ async def main():
     else:
         log.warning("On-chain copy trading: DISABLED (configure POLYGON_RPC in .env)")
 
-    # Web dashboard — http://localhost:8080
+    # Web dashboard — Railway PORT env var 우선 사용
+    dashboard_port = int(os.environ.get("PORT", 8080))
     tasks.append(asyncio.create_task(
-        start_dashboard(store, portfolio, lambda: gateway.stats),
+        start_dashboard(store, portfolio, lambda: gateway.stats, port=dashboard_port),
         name="dashboard"
     ))
-    log.info("Dashboard: http://localhost:8080")
+    log.info(f"Dashboard: http://0.0.0.0:{dashboard_port}")
 
     log.info(f"System running with {len(tasks)} tasks. Ctrl+C to stop.")
     log.info(f"Active strategies: oracle_convergence, fee_arb (near-certain + internal_arb), "
