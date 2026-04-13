@@ -361,21 +361,26 @@ async def main():
     await store.update_markets(markets)
     log.info(f"Loaded {len(markets)} markets, {sum(len(m.tokens) for m in markets)} tokens")
 
-    # Build wallet profitability database (runs once; skip if already done)
-    from core.db import get_conn as _gc
-    conn = _gc()
-    wallet_count = conn.execute("SELECT COUNT(*) FROM wallet_stats").fetchone()[0]
-    if wallet_count == 0:
-        log.info("No wallet data found. Building wallet database (this takes ~5 minutes)...")
-        try:
-            await build_wallet_database()
-        except Exception as e:
-            log.warning(f"Wallet database build failed: {e}. Copy trading will be limited.")
-    else:
-        log.info(f"Wallet database: {wallet_count} wallets loaded")
+    # Build wallet profitability database — 백그라운드로 실행 (대시보드 블로킹 방지)
+    async def _build_wallet_db_bg():
+        from core.db import get_conn as _gc
+        conn = _gc()
+        wallet_count = conn.execute("SELECT COUNT(*) FROM wallet_stats").fetchone()[0]
+        if wallet_count == 0:
+            log.info("No wallet data found. Building wallet database in background (~5 min)...")
+            try:
+                await build_wallet_database()
+                log.info("Wallet database build complete.")
+            except Exception as e:
+                log.warning(f"Wallet database build failed: {e}. Copy trading will be limited.")
+        else:
+            log.info(f"Wallet database: {wallet_count} wallets loaded")
 
     # Init correlated arb scanner (relation graph auto-built and injected)
     corr_arb_scanner = CorrelatedArbScanner(store, raw_signal_bus)
+
+    # 지갑 DB 백그라운드 빌드 태스크 등록
+    asyncio.create_task(_build_wallet_db_bg(), name="wallet_db_build")
 
     # ── CORE 3 STRATEGIES ONLY ────────────────────────────────────────────────
     # Each strategy here has verified mathematical edge.
