@@ -116,12 +116,12 @@ def decode_order_filled_event(log_entry: dict, abi: list) -> Optional[dict]:
         fee = decoded[4] / 1e6
 
         # Determine: is maker buying or selling?
-        # maker_asset_id is what maker is giving
-        # If maker gives USDC → maker is BUYING shares
-        # USDC token ID on Polygon (USDC.e contract)
-        USDC_TOKEN_ID = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
+        # In CTF Exchange: collateral (USDC) is represented as bytes32(0) — all zeros.
+        # maker_asset_id == 0x000...000 means maker is giving USDC → BUY
+        # Any non-zero maker_asset_id means maker is giving prediction shares → SELL
+        USDC_ASSET_ID = "0" * 64  # bytes32(0)
 
-        if maker_asset_id.lower() == USDC_TOKEN_ID.lower()[2:]:
+        if maker_asset_id.lower() == USDC_ASSET_ID:
             # Maker gives USDC → BUY
             side = "BUY"
             token_id = taker_asset_id   # what maker receives = the prediction token

@@ -353,6 +353,12 @@ async def main():
     reconciler = PositionReconciler(portfolio, gateway.get_clob)
     gateway.set_reconciler(reconciler)
 
+    # 스타트업 인증 검증 — 실매매 모드에서 잘못된 키로 첫 주문까지 기다리지 않음
+    creds_ok = await gateway.validate_credentials()
+    if not config.DRY_RUN and not creds_ok:
+        log.error("LIVE mode credential validation failed. Fix keys and restart.")
+        return
+
     # Initial market fetch
     log.info("Fetching initial market data...")
     markets = await fetch_active_markets(limit=500)
@@ -443,15 +449,17 @@ async def main():
     except Exception as e:
         log.warning(f"WebSocket startup failed: {e}. Falling back to REST polling.")
 
-    # On-chain watcher (requires premium RPC)
-    if config.POLYGON_RPC and "alchemy" in config.POLYGON_RPC.lower():
+    # On-chain copy trading — 모든 Polygon RPC 사용 가능 (public RPC 포함)
+    # Alchemy: 블록당 2s 폴링으로 더 빠름 / public RPC: 5-10s 딜레이 허용
+    if config.POLYGON_RPC:
         tasks.append(asyncio.create_task(
             OnChainWatcher(store, raw_signal_bus).start(),
             name="onchain"
         ))
-        log.info("On-chain copy trading: ACTIVE")
+        rpc_type = "Alchemy (fast)" if "alchemy" in config.POLYGON_RPC.lower() else "public RPC"
+        log.info(f"On-chain copy trading: ACTIVE ({rpc_type})")
     else:
-        log.warning("On-chain copy trading: DISABLED (configure POLYGON_RPC in .env)")
+        log.warning("On-chain copy trading: DISABLED (set POLYGON_RPC)")
 
     # Web dashboard — Railway PORT env var 우선 사용
     dashboard_port = int(os.environ.get("PORT", 8080))

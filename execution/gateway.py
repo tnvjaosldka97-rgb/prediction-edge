@@ -84,6 +84,29 @@ class ExecutionGateway:
         except Exception as e:
             log.error(f"CLOB client init failed: {e}")
 
+    async def validate_credentials(self) -> bool:
+        """
+        Startup check — verify credentials are valid before first trade.
+        Calls get_balance() on CLOB. Fails fast if keys are wrong.
+        """
+        if config.DRY_RUN:
+            log.info("[Gateway] DRY RUN mode — skipping credential validation")
+            return True
+        if not config.PRIVATE_KEY or not config.API_KEY:
+            log.error("[Gateway] LIVE mode but no credentials set! Set PRIVATE_KEY + POLY_API_KEY")
+            return False
+        self._init_clob_client()
+        if not self._clob_client:
+            return False
+        try:
+            balance = self._clob_client.get_balance()
+            usdc = float(balance.get("balance", 0)) / 1e6
+            log.info(f"[Gateway] Credentials valid ✓ — USDC balance: ${usdc:,.2f}")
+            return True
+        except Exception as e:
+            log.error(f"[Gateway] Credential validation FAILED: {e}")
+            return False
+
     async def submit(
         self,
         order: Order,
@@ -128,6 +151,11 @@ class ExecutionGateway:
             await self._fill_bus.put(fill)
             return fill
 
+        # Maker-first: non-IMMEDIATE signals post GTC limit (0% fee), fall back to taker after 60s
+        urgency = signal.urgency if signal else "HIGH"
+        if urgency not in ("IMMEDIATE", "HIGH") and order.order_type == "GTC":
+            return await self._submit_maker_first(order, signal)
+
         return await self._submit_live(order, signal)
 
     def _simulate_fill(self, order: Order) -> Fill:
@@ -154,6 +182,108 @@ class ExecutionGateway:
             fill.fee_paid, order.strategy,
         )
         return fill
+
+    async def _submit_maker_first(self, order: Order, signal: Optional[Signal] = None) -> Optional[Fill]:
+        """
+        Maker-first execution: post GTC limit at signal price (rests in book = 0% fee).
+        Wait up to 60s. If unfilled, cancel and fall back to taker.
+
+        Fee savings: taker costs 2%*(1-p) per USD. At p=0.5 that's 1% saved per trade.
+        Over 300 trades this compounds materially.
+        """
+        if not self._clob_client:
+            self._init_clob_client()
+        if not self._clob_client:
+            return await self._submit_live(order, signal)
+
+        try:
+            from py_clob_client.clob_types import OrderArgs
+            args = OrderArgs(
+                token_id=order.token_id,
+                price=order.price,
+                size=order.size_usd / order.price,
+                side=order.side,
+            )
+            resp = self._clob_client.create_and_post_order(args)
+            order_id = resp.get("orderID", "")
+            size_matched = float(resp.get("sizeMatched", 0))
+
+            # Immediate fill (crossed spread) — treat as taker fill
+            if size_matched > 0:
+                fee = order.price * (1 - order.price) * config.TAKER_FEE_RATE * size_matched
+                fill = Fill(
+                    order_id=order_id,
+                    condition_id=order.condition_id,
+                    token_id=order.token_id,
+                    side=order.side,
+                    fill_price=float(resp.get("price", order.price)),
+                    fill_size=size_matched,
+                    fee_paid=fee,
+                )
+                db.insert_trade(
+                    order_id, order.condition_id, order.token_id,
+                    order.side, fill.fill_price, size_matched, fee, order.strategy,
+                )
+                await self._fill_bus.put(fill)
+                self._submitted_count += 1
+                if self._reconciler:
+                    self._reconciler.confirm_fill(order_id)
+                return fill
+
+            if not order_id:
+                return await self._submit_live(order, signal)
+
+            # Order resting — poll for 60s then cancel + taker fallback
+            log.info(
+                f"[MAKER] {order.side} ${order.size_usd:.2f} @ {order.price:.4f} "
+                f"order_id={order_id[:12]} — waiting up to 60s for maker fill"
+            )
+            self._submitted_count += 1
+            if self._reconciler:
+                self._reconciler.register_order(order_id)
+
+            for _ in range(12):  # 12 × 5s = 60s
+                await asyncio.sleep(5)
+                try:
+                    status = self._clob_client.get_order(order_id)
+                    filled = float(status.get("sizeMatched", 0))
+                    if filled > 0:
+                        fill_price = float(status.get("price", order.price))
+                        # Maker fill = 0% fee
+                        fill = Fill(
+                            order_id=order_id,
+                            condition_id=order.condition_id,
+                            token_id=order.token_id,
+                            side=order.side,
+                            fill_price=fill_price,
+                            fill_size=filled,
+                            fee_paid=0.0,
+                        )
+                        db.insert_trade(
+                            order_id, order.condition_id, order.token_id,
+                            order.side, fill_price, filled, 0.0, order.strategy + "_maker",
+                        )
+                        await self._fill_bus.put(fill)
+                        if self._reconciler:
+                            self._reconciler.confirm_fill(order_id)
+                        log.info(
+                            f"[MAKER FILL] {order.side} {filled:.4f}sh @ {fill_price:.4f} "
+                            f"fee=$0.00 (saved ~${order.price*(1-order.price)*config.TAKER_FEE_RATE*filled:.4f})"
+                        )
+                        return fill
+                    if status.get("status") in ("CANCELLED", "EXPIRED"):
+                        break
+                except Exception:
+                    pass
+
+            # Cancel resting order, fall back to taker
+            await self.cancel_order(order_id)
+            log.info(f"[MAKER→TAKER] No fill in 60s, falling back to taker for {order.token_id[:8]}")
+            return await self._submit_live(order, signal)
+
+        except Exception as e:
+            log.warning(f"Maker-first failed ({e}), falling back to taker")
+            return await self._submit_live(order, signal)
 
     async def _submit_live(self, order: Order, signal: Optional[Signal] = None) -> Optional[Fill]:
         """

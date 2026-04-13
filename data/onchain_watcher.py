@@ -177,7 +177,7 @@ def _decode_trade_log(log_entry: dict) -> Optional[dict]:
     Topic[0] = keccak256("OrderFilled(...)")
     """
     # OrderFilled event topic (keccak256 of signature)
-    ORDER_FILLED_TOPIC = "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06c0f92f43b0b6e0e7e7e8e8c"
+    ORDER_FILLED_TOPIC = "0x30021c0a2a864e227fa5f28b5303763fe379f4cf7e9aa8986ee659fca3ee244b"
 
     topics = log_entry.get("topics", [])
     data = log_entry.get("data", "")
@@ -223,8 +223,8 @@ class OnChainWatcher:
     """
 
     # keccak256("OrderFilled(bytes32,address,address,bytes32,bytes32,uint256,uint256,uint256)")
-    # This is the canonical topic for the Polymarket CTF Exchange OrderFilled event
-    ORDER_FILLED_TOPIC = "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06c0f92f43b0b6e0e7e7e8e8c"
+    # Computed via eth_hash.auto.keccak — verified correct
+    ORDER_FILLED_TOPIC = "0x30021c0a2a864e227fa5f28b5303763fe379f4cf7e9aa8986ee659fca3ee244b"
 
     def __init__(self, market_store, signal_bus: asyncio.Queue):
         self._market_store = market_store
