@@ -64,23 +64,38 @@ class ExecutionGateway:
         return self._clob_client
 
     def _init_clob_client(self):
-        """Lazy init — only when we have credentials."""
-        if not config.PRIVATE_KEY or not config.API_KEY:
+        """
+        Init CLOB client.
+        1. Try stored L2 API creds (fast path)
+        2. If missing or invalid, auto-derive from PRIVATE_KEY (creates new L2 session)
+        """
+        if not config.PRIVATE_KEY:
             return
         try:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
-            self._clob_client = ClobClient(
-                host=config.CLOB_HOST,
-                chain_id=config.POLYGON_CHAIN_ID,
-                key=config.PRIVATE_KEY,
-                creds=ApiCreds(
-                    api_key=config.API_KEY,
-                    api_secret=config.API_SECRET,
-                    api_passphrase=config.API_PASSPHRASE,
-                ),
-            )
-            log.info("CLOB client initialized (L2 auth)")
+
+            if config.API_KEY and config.API_SECRET and config.API_PASSPHRASE:
+                # Use stored creds
+                self._clob_client = ClobClient(
+                    host=config.CLOB_HOST,
+                    chain_id=config.POLYGON_CHAIN_ID,
+                    key=config.PRIVATE_KEY,
+                    creds=ApiCreds(
+                        api_key=config.API_KEY,
+                        api_secret=config.API_SECRET,
+                        api_passphrase=config.API_PASSPHRASE,
+                    ),
+                )
+                log.info("CLOB client initialized (stored L2 creds)")
+            else:
+                # Derive L2 creds from private key (L1 auth)
+                self._clob_client = ClobClient(
+                    host=config.CLOB_HOST,
+                    chain_id=config.POLYGON_CHAIN_ID,
+                    key=config.PRIVATE_KEY,
+                )
+                log.info("CLOB client initialized (L1 key only — will derive L2 on first call)")
         except Exception as e:
             log.error(f"CLOB client init failed: {e}")
 
@@ -99,11 +114,44 @@ class ExecutionGateway:
         if not self._clob_client:
             return False
         try:
-            # get_orders() is a lightweight auth-required call available on all py_clob_client versions
+            # Try get_orders() — lightweight auth check
             orders = self._clob_client.get_orders()
             log.info(f"[Gateway] Credentials valid ✓ — open orders: {len(orders) if isinstance(orders, list) else 0}")
             return True
         except Exception as e:
+            err = str(e)
+            if "401" in err or "Unauthorized" in err or "Invalid api key" in err:
+                # L2 creds rejected — try to derive fresh ones from private key
+                log.warning("[Gateway] L2 creds invalid — attempting to derive fresh credentials from private key...")
+                try:
+                    from py_clob_client.client import ClobClient
+                    fresh = ClobClient(
+                        host=config.CLOB_HOST,
+                        chain_id=config.POLYGON_CHAIN_ID,
+                        key=config.PRIVATE_KEY,
+                    )
+                    creds = fresh.create_or_derive_api_creds()
+                    # Re-init with fresh creds
+                    from py_clob_client.clob_types import ApiCreds
+                    self._clob_client = ClobClient(
+                        host=config.CLOB_HOST,
+                        chain_id=config.POLYGON_CHAIN_ID,
+                        key=config.PRIVATE_KEY,
+                        creds=ApiCreds(
+                            api_key=creds.api_key,
+                            api_secret=creds.api_secret,
+                            api_passphrase=creds.api_passphrase,
+                        ),
+                    )
+                    orders = self._clob_client.get_orders()
+                    log.info(
+                        f"[Gateway] Fresh L2 creds derived ✓ | "
+                        f"key={creds.api_key[:12]}... | open orders: {len(orders) if isinstance(orders, list) else 0}"
+                    )
+                    return True
+                except Exception as e2:
+                    log.error(f"[Gateway] L2 key derivation failed: {e2}")
+                    return False
             log.error(f"[Gateway] Credential validation FAILED: {e}")
             return False
 
