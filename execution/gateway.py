@@ -99,9 +99,9 @@ class ExecutionGateway:
         if not self._clob_client:
             return False
         try:
-            balance = self._clob_client.get_balance()
-            usdc = float(balance.get("balance", 0)) / 1e6
-            log.info(f"[Gateway] Credentials valid ✓ — USDC balance: ${usdc:,.2f}")
+            # get_orders() is a lightweight auth-required call available on all py_clob_client versions
+            orders = self._clob_client.get_orders()
+            log.info(f"[Gateway] Credentials valid ✓ — open orders: {len(orders) if isinstance(orders, list) else 0}")
             return True
         except Exception as e:
             log.error(f"[Gateway] Credential validation FAILED: {e}")
