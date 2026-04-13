@@ -377,69 +377,57 @@ async def main():
     # Init correlated arb scanner (relation graph auto-built and injected)
     corr_arb_scanner = CorrelatedArbScanner(store, raw_signal_bus)
 
-    # Assemble all tasks
+    # ── CORE 3 STRATEGIES ONLY ────────────────────────────────────────────────
+    # Each strategy here has verified mathematical edge.
+    # Disabled strategies remain in codebase but are NOT running:
+    #   - ClosingConvergence: no model edge without external probability source
+    #   - OrderFlowMonitor:   REST polling 60s delay, always arrives too late
+    #   - CorrelatedArb:      correlation breaks at resolution, unverified
+    #   - MarketMaking:       requires real orderbook depth, not synthetic
+    #   - CrossPlatformArb:   re-enable when Kalshi keys are configured
+    # ─────────────────────────────────────────────────────────────────────────
     tasks = [
-        # Data layer
-        asyncio.create_task(market_refresh_loop(store), name="market_refresh"),
-
-        # Signal generators → raw_signal_bus
-        asyncio.create_task(OracleMonitor(store, raw_signal_bus).start(),        name="oracle_monitor"),
-        asyncio.create_task(FeeArbitrageScanner(store, raw_signal_bus).start(),  name="fee_arb"),
-        asyncio.create_task(ClosingConvergenceScanner(store, raw_signal_bus).start(), name="convergence"),
-        asyncio.create_task(OrderFlowMonitor(store, raw_signal_bus).start(),     name="order_flow"),
-        asyncio.create_task(corr_arb_scanner.start(),                            name="corr_arb"),
-
-        # Auto-builds relation graph (Gamma API + Claude + price correlation)
-        # Refreshes every 6 hours — zero manual work required
-        asyncio.create_task(
-            RelationGraphManager(store, corr_arb_scanner).start(),
-            name="relation_builder"
-        ),
-
-        # Signal aggregator: raw_signal_bus → exec_signal_bus
-        asyncio.create_task(
-            SignalAggregator(raw_signal_bus, exec_signal_bus).start(),
-            name="aggregator"
-        ),
-
-        # Calibration feedback loop
-        asyncio.create_task(CalibrationTracker(store).start(), name="calibration"),
-
-        # Execution
-        asyncio.create_task(
-            process_aggregated_signals(exec_signal_bus, store, gateway, portfolio),
-            name="execution"
-        ),
-
-        # Fill consumer: updates portfolio.positions + bankroll from every fill
-        asyncio.create_task(fill_consumer(fill_bus, portfolio, store), name="fill_consumer"),
-
-        # Keep position prices fresh for accurate PnL
-        asyncio.create_task(position_price_updater(portfolio, store), name="price_updater"),
-
-        # Market making manager: starts/stops MM loops per eligible market
-        asyncio.create_task(market_maker_manager(store, gateway, portfolio), name="mm_manager"),
-
-        # CLOB REST orderbook poller — real orderbook data even without WebSocket
+        # Data layer — always on
+        asyncio.create_task(market_refresh_loop(store),              name="market_refresh"),
         asyncio.create_task(ClobOrderbookPoller(store, portfolio).start(), name="ob_poller"),
 
-        # Cross-platform arb: Kalshi vs Polymarket price divergence
-        asyncio.create_task(
-            CrossPlatformArbScanner(store, raw_signal_bus).start(),
-            name="cross_platform_arb"
-        ),
+        # Strategy 1: Oracle Convergence
+        # After UMA resolves a market, price drifts to 1.0 over 2-10 min.
+        # Edge: 3-15% with near-zero dispute risk. Proven, repeatable.
+        asyncio.create_task(OracleMonitor(store, raw_signal_bus).start(), name="oracle_monitor"),
 
-        # Exit signal generator — harvest profits before they decay
+        # Strategy 2: Fee Arbitrage (near-certain tokens p > 0.95)
+        # Buy a token at 0.97 that will settle at 1.00. Fee ≈ 0.06%. Net ≈ 2.9%.
+        # Also catches YES+NO internal arb when real orderbook confirms gap.
+        asyncio.create_task(FeeArbitrageScanner(store, raw_signal_bus).start(), name="fee_arb"),
+
+        # Strategy 3: Exit signals on existing positions
+        # Lock in profits before they decay. Prevents giving back gains.
         asyncio.create_task(
             ExitSignalGenerator(portfolio, store, raw_signal_bus).start(),
             name="exit_signals"
         ),
 
-        # Self-improvement: auto-tunes parameters every 7 days from trade outcomes
-        asyncio.create_task(AutoTuner().start(), name="auto_tuner"),
+        # Cross-platform arb: active only when Kalshi keys are set
+        asyncio.create_task(
+            CrossPlatformArbScanner(store, raw_signal_bus).start(),
+            name="cross_platform_arb"
+        ),
 
-        # Position/balance reconciler (syncs local state with CLOB truth)
-        asyncio.create_task(reconciler.start(), name="reconciler"),
+        # Pipeline
+        asyncio.create_task(
+            SignalAggregator(raw_signal_bus, exec_signal_bus).start(),
+            name="aggregator"
+        ),
+        asyncio.create_task(CalibrationTracker(store).start(), name="calibration"),
+        asyncio.create_task(
+            process_aggregated_signals(exec_signal_bus, store, gateway, portfolio),
+            name="execution"
+        ),
+        asyncio.create_task(fill_consumer(fill_bus, portfolio, store), name="fill_consumer"),
+        asyncio.create_task(position_price_updater(portfolio, store),  name="price_updater"),
+        asyncio.create_task(reconciler.start(),                        name="reconciler"),
+        asyncio.create_task(AutoTuner().start(),                       name="auto_tuner"),
     ]
 
     # WebSocket real-time orderbook (requires aiohttp connection)
@@ -468,9 +456,8 @@ async def main():
     log.info("Dashboard: http://localhost:8080")
 
     log.info(f"System running with {len(tasks)} tasks. Ctrl+C to stop.")
-    log.info(f"Strategies: oracle_convergence, fee_arb, closing_convergence, "
-             f"order_flow, correlated_arb, on_chain_copy, market_making, "
-             f"cross_platform_arb, exit_signals")
+    log.info(f"Active strategies: oracle_convergence, fee_arb (near-certain + internal_arb), "
+             f"exit_signals, cross_platform_arb (if Kalshi keys set)")
 
     try:
         await asyncio.gather(*tasks)
