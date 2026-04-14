@@ -161,5 +161,43 @@ DATA_API_REQ_PER_MIN = 60
 # ── Database ─────────────────────────────────────────────────────────────────
 DB_PATH = os.getenv("DB_PATH", "prediction_edge.db")
 
+# ── DB path bootstrap (fail-safe) ────────────────────────────────────────────
+# Runs at config import — BEFORE any sqlite3.connect call anywhere.
+# Ensures parent directory exists and is writable. If the configured path
+# is unwritable (e.g. Railway volume not mounted), fall back to CWD so the
+# bot starts and can at least be diagnosed.
+def _bootstrap_db_path():
+    global DB_PATH
+    from pathlib import Path as _P
+    import sys as _sys
+    p = _P(DB_PATH)
+    parent = p.parent
+    try:
+        if str(parent) not in ("", "."):
+            parent.mkdir(parents=True, exist_ok=True)
+        # Verify writable via trivial touch
+        probe = parent / ".db_write_probe"
+        try:
+            probe.write_text("x")
+            probe.unlink()
+        except Exception as e:
+            raise PermissionError(f"{parent} not writable: {e}")
+        print(f"[config] DB_PATH ok: {p.resolve()}", flush=True)
+    except Exception as e:
+        fallback = _P("./prediction_edge.db").resolve()
+        print(
+            f"[config] WARNING: {DB_PATH} unusable ({e}). "
+            f"Falling back to {fallback}. DATA WILL NOT PERSIST.",
+            flush=True, file=_sys.stderr,
+        )
+        DB_PATH = str(fallback)
+
+_bootstrap_db_path()
+
 # ── Dry run mode ─────────────────────────────────────────────────────────────
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+# Fail-safe DRY_RUN parsing: treat anything except an explicit disable
+# token ("false" / "0" / "no" / "off") as DRY. Prevents accidental LIVE
+# mode from typos, whitespace, or unset variables.
+_dry_raw = os.getenv("DRY_RUN", "true").strip().lower()
+DRY_RUN = _dry_raw not in ("false", "0", "no", "off")
+print(f"[config] DRY_RUN raw={_dry_raw!r} → parsed={DRY_RUN}", flush=True)
