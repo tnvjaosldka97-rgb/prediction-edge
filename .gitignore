@@ -9,3 +9,17 @@ __pycache__/
 market_relations.json
 logs/
 venv/
+
+# Backtest / sweep / bot output logs — local only
+bot_output*.log
+backtest-result.txt
+backtest_new.txt
+backtest_v2.txt
+bt_v2.txt
+sweep.txt
+sweep2.txt
+sweep3.txt
+backtest/oracle_calibration_result.json
+
+# Backtest cache (pickled API responses)
+backtest/.cache/

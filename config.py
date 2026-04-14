@@ -34,6 +34,13 @@ API_PASSPHRASE = os.getenv("POLY_API_PASSPHRASE", "")
 KALSHI_ACCESS_KEY      = os.getenv("KALSHI_ACCESS_KEY", "")       # Kalshi key ID (UUID)
 KALSHI_PRIVATE_KEY_B64 = os.getenv("KALSHI_PRIVATE_KEY_B64", "")  # base64(private_key_pem)
 
+# ── Limitless Exchange (Base chain, Polymarket fork) ───────────────────────
+LIMITLESS_API_BASE     = "https://api.limitless.exchange"
+LIMITLESS_API_KEY      = os.getenv("LIMITLESS_API_KEY", "")       # X-API-Key header
+LIMITLESS_PRIVATE_KEY  = os.getenv("LIMITLESS_PRIVATE_KEY", "")   # EVM wallet key for signing orders
+LIMITLESS_CHAIN_ID     = 8453  # Base
+LIMITLESS_USDC         = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
 # ── Trading parameters ───────────────────────────────────────────────────────
 # $100 시드 최적화:
 # - 최소 주문 $2 (Polymarket 최소값)
@@ -46,8 +53,56 @@ MAX_SINGLE_MARKET_PCT  = 0.08
 MAX_CATEGORY_PCT       = 0.25
 MAX_DRAWDOWN_HALT        = 0.20
 MAX_DRAWDOWN_REDUCE      = 0.12
-MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "8"))
-MAX_DAILY_TRADES         = int(os.getenv("MAX_DAILY_TRADES", "30"))
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "30"))
+MAX_DAILY_TRADES         = int(os.getenv("MAX_DAILY_TRADES", "120"))
+
+# Per-strategy concurrent position sub-caps.
+# Prevents one strategy from hogging global slots while still allowing
+# volume-hungry strategies (fee_arb, internal_arb) to run at higher throughput.
+# A strategy not listed here is only bounded by MAX_CONCURRENT_POSITIONS.
+STRATEGY_POSITION_CAPS = {
+    # fee_arbitrage: 90-day backtest sweep (all thresholds × all filters)
+    # shows break-even at best (+$11.82/35 trades at threshold=0.95 with
+    # unknown+weather blocked, statistically zero). Every other config
+    # loses money. Strategy deactivated until structural fix. Keep cap=1
+    # for observation mode only (log-only, no cumulative risk).
+    "fee_arbitrage":        1,
+    # closing_convergence: sole proven alpha source.
+    #   [0.70, 0.95) × 0.005 momentum × unknown/entertainment blocked
+    #   → 54 trades, 96.3% winR, +$924/$5400 deployed (+17.1%/90d)
+    #   → Sharpe 16+ (noisy — assume 5-8 production)
+    # Give it runway.
+    "closing_convergence": 20,
+    # internal_arb: structural YES+NO arb — different math from fee_arb,
+    # not yet backtested in realistic_engine. Keep moderate cap.
+    "internal_arb":        12,
+    "oracle_convergence":  10,
+    "cross_platform":       8,
+    "limitless_arb":        8,
+    "correlated_arb":       6,
+    "order_flow":           4,
+    "claude_oracle":        4,
+    "base_rate":            3,
+    "news_alpha":           3,
+}
+
+# Total portfolio notional cap (fraction of bankroll). Prevents the
+# position-count cap from silently approving oversized total exposure.
+MAX_TOTAL_NOTIONAL_PCT   = float(os.getenv("MAX_TOTAL_NOTIONAL_PCT", "0.80"))
+
+# Price history retention — keep only the last N hours of tick data.
+# Anything older is pruned on startup and periodically. Prevents the
+# SQLite "database or disk is full" failure mode.
+PRICE_HISTORY_TTL_HOURS  = int(os.getenv("PRICE_HISTORY_TTL_HOURS", "48"))
+
+# ── Live phase-in ────────────────────────────────────────────────────────────
+# When transitioning from DRY_RUN to LIVE, cap position size aggressively
+# for the first N live trades so a silent bug caught in production can only
+# burn a tiny amount. The phase-in multiplier scales linearly from
+# PHASE_IN_START_MULT → 1.0 over PHASE_IN_TRADES trades (based on
+# cumulative live trade count recorded in killswitch state).
+PHASE_IN_TRADES     = int(os.getenv("PHASE_IN_TRADES", "20"))
+PHASE_IN_START_MULT = float(os.getenv("PHASE_IN_START_MULT", "0.10"))
 WHALE_THRESHOLD_USD      = int(os.getenv("WHALE_THRESHOLD_USD", "1000"))     # $1000으로 하향
 VOLUME_SPIKE_RATIO     = 3.0         # 3x 급등으로 낮춤 (5x는 너무 드묾)
 

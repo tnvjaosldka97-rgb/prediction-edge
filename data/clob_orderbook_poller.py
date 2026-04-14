@@ -13,6 +13,7 @@ import asyncio
 import time
 from core.logger import log
 from data.polymarket_rest import fetch_orderbook
+from risk.manipulation_guard import get_guard
 
 _POLL_INTERVAL_SEC = 10.0
 _MAX_TOKENS        = 30     # top N tokens to maintain real orderbooks for
@@ -84,6 +85,14 @@ class ClobOrderbookPoller:
                     if book and (book.bids or book.asks):
                         await self._store.update_orderbook(book)
                         updated += 1
+                        # Feed manipulation guard with depth snapshots
+                        get_guard().record_book_snapshot(
+                            token_id=token_id,
+                            bid_depth=book.bid_depth(levels=5),
+                            ask_depth=book.ask_depth(levels=5),
+                            best_bid=book.best_bid,
+                            best_ask=book.best_ask,
+                        )
                 except Exception as e:
                     log.debug(f"[OB POLLER] fetch failed {token_id[:8]}: {e}")
                 # Stagger to avoid burst — 120 req/min limit = 0.5s gap

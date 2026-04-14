@@ -99,7 +99,7 @@ async def api_trades():
     try:
         conn = sqlite3.connect(config.DB_PATH)
         rows = conn.execute(
-            "SELECT order_id, condition_id, token_id, side, fill_price, fill_size, fee_paid, strategy, timestamp "
+            "SELECT order_id, condition_id, token_id, side, fill_price, size_shares, fee_paid, strategy, timestamp, pnl "
             "FROM trades ORDER BY timestamp DESC LIMIT 50"
         ).fetchall()
         conn.close()
@@ -115,9 +115,139 @@ async def api_trades():
                 "fee_paid": round(float(r[6] or 0), 4),
                 "strategy": r[7],
                 "time": time.strftime("%H:%M:%S", time.localtime(float(r[8] or 0))),
+                "pnl": round(float(r[9]), 3) if r[9] is not None else None,
             })
         return result
     except Exception as e:
+        return []
+
+
+@app.get("/api/closed_trades")
+async def api_closed_trades():
+    """
+    Closed trade pairs: BUY with realized P&L.
+    exit_price: 실제 SELL 체결가 (같은 token_id의 다음 SELL 거래 매칭).
+    SELL 없으면 pnl로 역산.
+    """
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        rows = conn.execute("""
+            SELECT
+                b.condition_id, b.token_id,
+                b.fill_price   AS entry_price,
+                b.size_shares,
+                b.fee_paid     AS entry_fee,
+                b.strategy,
+                b.timestamp    AS entry_ts,
+                b.pnl,
+                (SELECT s.fill_price FROM trades s
+                 WHERE s.token_id = b.token_id AND s.side = 'SELL'
+                   AND s.timestamp > b.timestamp
+                 ORDER BY s.timestamp ASC LIMIT 1) AS exit_price_actual,
+                (SELECT s.timestamp FROM trades s
+                 WHERE s.token_id = b.token_id AND s.side = 'SELL'
+                   AND s.timestamp > b.timestamp
+                 ORDER BY s.timestamp ASC LIMIT 1) AS exit_ts
+            FROM trades b
+            WHERE b.side = 'BUY' AND b.pnl IS NOT NULL
+            ORDER BY b.timestamp DESC
+            LIMIT 50
+        """).fetchall()
+        conn.close()
+
+        result = []
+        for r in rows:
+            entry = float(r[2] or 0)
+            size  = float(r[3] or 0)
+            pnl   = float(r[7] or 0)
+            cost  = entry * size
+
+            # 실제 SELL 체결가 우선, 없으면 pnl로 역산
+            if r[8] is not None:
+                exit_price = float(r[8])
+                price_source = "actual"
+            else:
+                exit_price = (entry * size + pnl) / size if size > 0 else 0
+                price_source = "estimated"
+
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0
+            hold_sec = (float(r[9]) - float(r[6])) if r[9] else None
+            hold_str = (
+                f"{int(hold_sec//3600)}h{int((hold_sec%3600)//60)}m"
+                if hold_sec and hold_sec >= 3600
+                else f"{int(hold_sec//60)}m" if hold_sec else "-"
+            )
+
+            result.append({
+                "condition_id":  (r[0] or "")[:12],
+                "token_id":      (r[1] or "")[:12],
+                "entry_price":   round(entry, 4),
+                "exit_price":    round(exit_price, 4),
+                "exit_source":   price_source,
+                "size_shares":   round(size, 4),
+                "cost_usd":      round(cost, 2),
+                "pnl":           round(pnl, 3),
+                "pnl_pct":       round(pnl_pct, 2),
+                "strategy":      r[5],
+                "hold_time":     hold_str,
+                "time":          time.strftime("%m/%d %H:%M", time.localtime(float(r[6] or 0))),
+            })
+        return result
+    except Exception:
+        return []
+
+
+# 전략별 사전확률 (web_server 자체 참조용 — db.py와 동기화 유지)
+_CAL_PRIORS = {
+    "fee_arbitrage":       {"accuracy": 0.882, "n": 30},
+    "oracle_convergence":  {"accuracy": 0.780, "n": 20},
+    "closing_convergence": {"accuracy": 0.655, "n": 20},
+    "order_flow":          {"accuracy": 0.548, "n": 10},
+    "cross_platform":      {"accuracy": 0.680, "n": 15},
+    "correlated_arb":      {"accuracy": 0.620, "n": 15},
+}
+
+
+@app.get("/api/calibration")
+async def api_calibration():
+    """
+    전략별 캘리브레이션 상태.
+    Kelly 단계, prior blend 비율, 적중률, 캘리브레이션 오차.
+    """
+    try:
+        from core import db as _db
+        import config as _cfg
+
+        strategies = list(_CAL_PRIORS.keys())
+        phases = sorted(_cfg.KELLY_CALIBRATION_PHASES.items())
+        result = []
+
+        for strat in strategies:
+            cal = _db.get_calibration_stats(strat)
+            count = cal["count"]
+
+            # Kelly phase fraction
+            phase_frac = phases[0][1]
+            for min_t, f in phases:
+                if count >= min_t:
+                    phase_frac = f
+
+            prior = _CAL_PRIORS[strat]
+            n_prior = prior["n"]
+            blend_pct = round(n_prior / (n_prior + max(count, 1)) * 100, 1)
+
+            result.append({
+                "strategy":        strat,
+                "trade_count":     count,
+                "accuracy":        round(cal["accuracy"] * 100, 1),
+                "calib_error":     round(cal["calibration_error"] * 100, 2),
+                "kelly_phase":     round(phase_frac * 100, 1),
+                "prior_blend_pct": blend_pct,
+                "is_prior":        cal.get("is_prior", count == 0),
+                "prior_accuracy":  round(prior["accuracy"] * 100, 1),
+            })
+        return result
+    except Exception:
         return []
 
 
@@ -275,37 +405,21 @@ async def api_stats():
 
 @app.get("/api/equity_curve")
 async def api_equity_curve():
-    """Hourly portfolio value history for equity curve chart."""
+    """Portfolio value history from snapshots (5min interval)."""
     try:
         conn = sqlite3.connect(config.DB_PATH)
-        # Get cumulative P&L from trades grouped by hour
-        rows = conn.execute("""
-            SELECT
-                CAST(timestamp / 3600 AS INTEGER) * 3600 as hour_ts,
-                SUM(CASE WHEN side='BUY' THEN -(fill_price * size_shares + fee_paid)
-                         WHEN side='SELL' THEN fill_price * size_shares - fee_paid
-                         ELSE 0 END) as cash_flow,
-                COUNT(*) as trade_count
-            FROM trades
-            GROUP BY hour_ts
-            ORDER BY hour_ts ASC
-        """).fetchall()
+        rows = conn.execute(
+            "SELECT timestamp, total_value, positions FROM portfolio_snapshots ORDER BY timestamp ASC"
+        ).fetchall()
         conn.close()
 
         if not rows:
+            # No snapshots yet — show current value as single point
+            if _portfolio:
+                return [{"t": int(time.time() * 1000), "v": round(_portfolio.total_value, 2), "trades": 0}]
             return _synthetic_equity_curve()
 
-        bankroll = float(os.getenv("BANKROLL", "1000"))
-        points = []
-        cumulative = bankroll
-        for r in rows:
-            cumulative += r[1]  # cash_flow
-            points.append({
-                "t": r[0] * 1000,  # JS timestamp
-                "v": round(cumulative, 2),
-                "trades": r[2],
-            })
-        return points
+        return [{"t": int(r[0] * 1000), "v": round(r[1], 2), "trades": r[2]} for r in rows]
     except Exception:
         return _synthetic_equity_curve()
 
@@ -489,6 +603,200 @@ async def api_risk():
         "submitted": stats.get("submitted", 0),
         "rejected": stats.get("rejected", 0),
     }
+
+
+@app.get("/api/manipulation")
+async def api_manipulation():
+    """Manipulation guard status — wash trading & spoofing scores."""
+    try:
+        from risk.manipulation_guard import get_guard
+        return get_guard().get_report()
+    except Exception:
+        return []
+
+
+@app.get("/shadow", response_class=HTMLResponse)
+async def shadow_page():
+    """Minimal shadow-live dashboard — self-refreshing every 30s."""
+    return """<!doctype html>
+<html><head><meta charset="utf-8"><title>Shadow-Live</title>
+<style>
+body{font-family:system-ui,monospace;background:#0b0d10;color:#d8dde6;margin:0;padding:24px}
+h1{font-size:18px;margin:0 0 16px;color:#7ee787}
+h2{font-size:14px;margin:24px 0 8px;color:#79c0ff}
+table{border-collapse:collapse;width:100%;font-size:12px;margin-bottom:12px}
+th{background:#161b22;padding:8px;text-align:right;color:#8b949e;font-weight:600;border-bottom:1px solid #30363d}
+th:first-child,td:first-child{text-align:left}
+td{padding:6px 8px;text-align:right;border-bottom:1px solid #21262d}
+.pos{color:#7ee787}.neg{color:#f85149}.muted{color:#6e7681}
+.totals{display:flex;gap:32px;padding:16px;background:#161b22;border-radius:8px;margin-bottom:24px}
+.totals div{flex:1}.totals .lbl{color:#8b949e;font-size:11px;text-transform:uppercase}.totals .val{font-size:24px;font-weight:600;margin-top:4px}
+.err{background:#3a1d1d;color:#ff7b7b;padding:12px;border-radius:6px}
+</style></head><body>
+<h1>🛰  Shadow-Live Dashboard  <span class="muted" id="ts"></span></h1>
+<div id="content"></div>
+<script>
+async function load(){
+  const r = await fetch('/api/shadow').then(r=>r.json()).catch(e=>({error:String(e)}));
+  const el = document.getElementById('content');
+  document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+  if(r.error){el.innerHTML='<div class="err">'+r.error+'</div>';return;}
+  if(!r.total_trades){el.innerHTML='<p class="muted">No virtual trades yet. Wait for signals to fire.</p>';return;}
+  const fmt=(v,suf='')=>{if(v==null)return '<span class="muted">n/a</span>';const c=v>=0?'pos':'neg';return `<span class="${c}">${v>=0?'+':''}${v.toFixed(2)}${suf}</span>`};
+  const pct=v=>v==null?'<span class="muted">n/a</span>':(v*100).toFixed(1)+'%';
+  let html='';
+  html+='<div class="totals">'+
+    '<div><div class="lbl">Trades</div><div class="val">'+r.total_trades+'</div></div>'+
+    '<div><div class="lbl">Realized</div><div class="val">'+fmt(r.totals.realized,' $')+'</div></div>'+
+    '<div><div class="lbl">Unrealized</div><div class="val">'+fmt(r.totals.unrealized,' $')+'</div></div>'+
+    '<div><div class="lbl">Deployed</div><div class="val">$'+r.totals.deployed.toFixed(2)+'</div></div>'+
+    '<div><div class="lbl">Return</div><div class="val">'+fmt(r.totals.return_pct,'%')+'</div></div>'+
+    '</div>';
+  html+='<h2>By Strategy</h2><table><thead><tr><th>Strategy</th><th>N</th><th>Resolved</th><th>WinR</th><th>Realized</th><th>Unreal</th><th>Deployed</th><th>Avg Slip</th><th>Drift 5m</th></tr></thead><tbody>';
+  for(const s of r.strategies){
+    html+=`<tr><td>${s.strategy}</td><td>${s.n_trades}</td><td>${s.n_resolved}</td><td>${pct(s.win_rate)}</td><td>${fmt(s.realized_pnl)}</td><td>${fmt(s.unrealized_pnl)}</td><td>$${s.deployed.toFixed(0)}</td><td>${s.avg_slippage?(s.avg_slippage*100).toFixed(2)+'¢':'-'}</td><td>${s.avg_drift_5m!=null?((s.avg_drift_5m*100).toFixed(2)+'¢'):'-'}</td></tr>`;
+  }
+  html+='</tbody></table>';
+  html+='<h2>By Category</h2><table><thead><tr><th>Category</th><th>N</th><th>WinR</th><th>Realized</th><th>Unreal</th></tr></thead><tbody>';
+  for(const c of r.categories){
+    html+=`<tr><td>${c.category}</td><td>${c.n_trades}</td><td>${pct(c.win_rate)}</td><td>${fmt(c.realized_pnl)}</td><td>${fmt(c.unrealized_pnl)}</td></tr>`;
+  }
+  html+='</tbody></table>';
+  html+='<h2>Recent 20 Trades</h2><table><thead><tr><th>Time</th><th>Strategy</th><th>Category</th><th>Fill</th><th>Size</th><th>Slip</th><th>Drift 5m</th><th>PnL</th></tr></thead><tbody>';
+  for(const t of r.recent){
+    const ts=new Date(t.ts*1000).toLocaleString();
+    const pnl=t.realized_pnl!=null?t.realized_pnl:(t.unrealized_pnl||0);
+    const label=t.resolved?'R':'U';
+    html+=`<tr><td class="muted">${ts}</td><td>${t.strategy||'-'}</td><td>${t.category||'-'}</td><td>${t.fill_price.toFixed(4)}</td><td>$${t.size_usd.toFixed(2)}</td><td>${t.slippage?(t.slippage*100).toFixed(2)+'¢':'-'}</td><td>${t.drift_5m!=null?(t.drift_5m*100).toFixed(2)+'¢':'-'}</td><td>${fmt(pnl)} <span class="muted">${label}</span></td></tr>`;
+  }
+  html+='</tbody></table>';
+  el.innerHTML=html;
+}
+load();setInterval(load,30000);
+</script></body></html>"""
+
+
+@app.get("/api/shadow")
+async def api_shadow():
+    """
+    Shadow-Live virtual trades summary.
+    Returns per-strategy + per-category aggregates plus overall totals.
+    """
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT id, strategy, category, fill_ts, fill_price, size_usd,
+                   slippage, levels_touched, mid_at_signal,
+                   mid_after_5s, mid_after_60s, mid_after_300s,
+                   exit_price, realized_pnl, unrealized_pnl, resolved_at
+            FROM virtual_trades ORDER BY fill_ts DESC LIMIT 1000
+        """).fetchall()
+
+        if not rows:
+            return {
+                "total_trades": 0, "strategies": [], "categories": [],
+                "totals": {"realized": 0, "unrealized": 0, "deployed": 0, "return_pct": 0},
+                "recent": [],
+            }
+
+        # Per-strategy
+        by_strat: dict = {}
+        for r in rows:
+            s = r["strategy"] or "unknown"
+            by_strat.setdefault(s, []).append(r)
+        strategies = []
+        for s, trades in by_strat.items():
+            resolved = [t for t in trades if t["resolved_at"]]
+            realized = sum(t["realized_pnl"] or 0 for t in resolved)
+            unreal = sum(t["unrealized_pnl"] or 0 for t in trades if not t["resolved_at"])
+            wins = sum(1 for t in resolved if (t["realized_pnl"] or 0) > 0)
+            winR = (wins / len(resolved)) if resolved else 0.0
+            slip = [t["slippage"] or 0 for t in trades]
+            avg_slip = sum(slip) / len(slip) if slip else 0.0
+            drifts = [
+                (t["mid_after_300s"] - t["fill_price"])
+                for t in trades
+                if t["mid_after_300s"] is not None
+            ]
+            avg_drift_5m = sum(drifts) / len(drifts) if drifts else None
+            deployed = sum(t["size_usd"] or 0 for t in trades)
+            strategies.append({
+                "strategy": s,
+                "n_trades": len(trades),
+                "n_resolved": len(resolved),
+                "realized_pnl": round(realized, 2),
+                "unrealized_pnl": round(unreal, 2),
+                "win_rate": round(winR, 4),
+                "avg_slippage": round(avg_slip, 5),
+                "avg_drift_5m": round(avg_drift_5m, 5) if avg_drift_5m is not None else None,
+                "deployed": round(deployed, 2),
+            })
+
+        # Per-category
+        by_cat: dict = {}
+        for r in rows:
+            c = r["category"] or "unknown"
+            by_cat.setdefault(c, []).append(r)
+        categories = []
+        for c, trades in by_cat.items():
+            resolved = [t for t in trades if t["resolved_at"]]
+            realized = sum(t["realized_pnl"] or 0 for t in resolved)
+            unreal = sum(t["unrealized_pnl"] or 0 for t in trades if not t["resolved_at"])
+            wins = sum(1 for t in resolved if (t["realized_pnl"] or 0) > 0)
+            winR = (wins / len(resolved)) if resolved else 0.0
+            categories.append({
+                "category": c,
+                "n_trades": len(trades),
+                "realized_pnl": round(realized, 2),
+                "unrealized_pnl": round(unreal, 2),
+                "win_rate": round(winR, 4),
+            })
+        categories.sort(key=lambda x: x["realized_pnl"])
+
+        # Totals
+        total_realized = sum(r["realized_pnl"] or 0 for r in rows if r["resolved_at"])
+        total_unrealized = sum(r["unrealized_pnl"] or 0 for r in rows if not r["resolved_at"])
+        total_deployed = sum(r["size_usd"] or 0 for r in rows)
+        return_pct = (
+            (total_realized + total_unrealized) / total_deployed * 100
+            if total_deployed else 0.0
+        )
+
+        # Recent 20 trades
+        recent = []
+        for r in rows[:20]:
+            recent.append({
+                "id": r["id"],
+                "ts": r["fill_ts"],
+                "strategy": r["strategy"],
+                "category": r["category"],
+                "fill_price": r["fill_price"],
+                "size_usd": r["size_usd"],
+                "slippage": r["slippage"],
+                "drift_5m": (
+                    (r["mid_after_300s"] - r["fill_price"])
+                    if r["mid_after_300s"] is not None else None
+                ),
+                "realized_pnl": r["realized_pnl"],
+                "unrealized_pnl": r["unrealized_pnl"],
+                "resolved": bool(r["resolved_at"]),
+            })
+
+        return {
+            "total_trades": len(rows),
+            "strategies": strategies,
+            "categories": categories,
+            "totals": {
+                "realized": round(total_realized, 2),
+                "unrealized": round(total_unrealized, 2),
+                "deployed": round(total_deployed, 2),
+                "return_pct": round(return_pct, 3),
+            },
+            "recent": recent,
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/api/feed")

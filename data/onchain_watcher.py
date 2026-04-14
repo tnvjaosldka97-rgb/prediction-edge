@@ -253,7 +253,12 @@ class OnChainWatcher:
         if not self._top_wallets:
             log.warning("No top wallets in DB. Run build_wallet_database() first.")
 
-        self._last_block = await _get_latest_block()
+        try:
+            self._last_block = await _get_latest_block()
+        except Exception as e:
+            log.warning(f"[OnChain] Polygon RPC 연결 실패 — 온체인 카피트레이딩 비활성화: {e}")
+            return
+
         self._running = True
 
         while self._running:

@@ -9,13 +9,16 @@ import time
 from core.models import Order, Signal, PortfolioState, Market
 from core.logger import log
 import config
+from risk.manipulation_guard import get_guard
 
 # ── 일일 트레이드 카운터 (프로세스 내 상태) ───────────────────────────────────
 _daily_trade_count: int = 0
 _daily_reset_ts: float = 0.0
 
-MAX_CONCURRENT_POSITIONS = int(getattr(config, "MAX_CONCURRENT_POSITIONS", 8))
-MAX_DAILY_TRADES         = int(getattr(config, "MAX_DAILY_TRADES", 30))
+MAX_CONCURRENT_POSITIONS = int(getattr(config, "MAX_CONCURRENT_POSITIONS", 30))
+MAX_DAILY_TRADES         = int(getattr(config, "MAX_DAILY_TRADES", 120))
+STRATEGY_POSITION_CAPS   = getattr(config, "STRATEGY_POSITION_CAPS", {})
+MAX_TOTAL_NOTIONAL_PCT   = float(getattr(config, "MAX_TOTAL_NOTIONAL_PCT", 0.80))
 
 
 def record_trade_executed():
@@ -49,12 +52,43 @@ def check_all(
     if _daily_trade_count >= MAX_DAILY_TRADES:
         return False, f"DAILY LIMIT: {_daily_trade_count}/{MAX_DAILY_TRADES} trades today"
 
-    # 1. 동시 포지션 한도
+    # 1. 잔고 부족 하드스탑 — asyncio 레이스 방지 (DRY_RUN 포함)
+    if portfolio.bankroll < config.MIN_ORDER_SIZE_USD:
+        return False, f"INSUFFICIENT BANKROLL: ${portfolio.bankroll:.2f}"
+
+    # 1b. 주문 금액이 잔고 초과 방지
+    if order.size_usd > portfolio.bankroll:
+        return False, f"ORDER_EXCEEDS_BANKROLL: ${order.size_usd:.2f} > ${portfolio.bankroll:.2f}"
+
+    # 1c. 동시 포지션 한도 — 전역 + 전략별 하위 캡
     open_positions = len(portfolio.positions)
     if open_positions >= MAX_CONCURRENT_POSITIONS:
         # oracle_convergence는 항상 허용 (수렴 기회 놓치면 안 됨)
         if not (signal and signal.strategy == "oracle_convergence"):
             return False, f"POSITION LIMIT: {open_positions}/{MAX_CONCURRENT_POSITIONS} open"
+
+    # 1c-2. 전략별 하위 캡 (fee_arb 같이 throughput 큰 전략을 풀어주되
+    #       한 전략이 전체 슬롯 독점하는 것 방지)
+    if signal and signal.strategy in STRATEGY_POSITION_CAPS:
+        strategy_cap = STRATEGY_POSITION_CAPS[signal.strategy]
+        strategy_open = sum(
+            1 for p in portfolio.positions.values()
+            if getattr(p, "strategy", None) == signal.strategy
+        )
+        if strategy_open >= strategy_cap:
+            return False, (
+                f"STRATEGY LIMIT: {signal.strategy} "
+                f"{strategy_open}/{strategy_cap} open"
+            )
+
+    # 1d. 총 노출 한도 ($ 기반) — 포지션 수보다 실제 리스크 제약
+    total_notional = sum(p.notional_usd for p in portfolio.positions.values())
+    max_total_notional = portfolio.bankroll * MAX_TOTAL_NOTIONAL_PCT
+    if total_notional + order.size_usd > max_total_notional:
+        return False, (
+            f"TOTAL NOTIONAL LIMIT: "
+            f"${total_notional + order.size_usd:.0f} > ${max_total_notional:.0f}"
+        )
 
     # 2. Drawdown halt
     if portfolio.drawdown >= config.MAX_DRAWDOWN_HALT:
@@ -92,6 +126,11 @@ def check_all(
     # 6. Signal expiry
     if signal and signal.is_expired():
         return False, "EXPIRED SIGNAL"
+
+    # 7b. Manipulation guard — final safety net
+    guard = get_guard()
+    if guard.is_rejected(order.token_id):
+        return False, f"MANIPULATION DETECTED: score={guard.get_score(order.token_id):.2f}"
 
     # 7. Drawdown reduction (halve sizes but don't halt)
     if portfolio.drawdown >= config.MAX_DRAWDOWN_REDUCE:

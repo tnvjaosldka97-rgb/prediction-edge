@@ -32,6 +32,7 @@ from typing import Optional
 import config
 from core.models import Market, Signal, Token
 from core.logger import log
+from core.category import effective_category, BLOCKED_CATEGORIES_CLOSING_CONV
 from signals.oracle_monitor import score_oracle_dispute_risk
 
 
@@ -115,6 +116,12 @@ def _compute_convergence_signal(
     """
     price = token.price
     days = market.days_to_resolution
+
+    # Category blocklist — empirically validated on 90-day backtest.
+    # "unknown" bucket was −$466/14 trades (57% winR). Removing it alone
+    # turns this strategy from +$124 → +$590 on the same parameter set.
+    if effective_category(market) in BLOCKED_CATEGORIES_CLOSING_CONV:
+        return None
 
     # Only act within convergence horizon
     if days > _CONVERGENCE_HORIZON_DAYS or days < 0:

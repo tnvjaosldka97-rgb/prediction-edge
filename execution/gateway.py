@@ -166,6 +166,16 @@ class ExecutionGateway:
         Returns immediate Fill if available, None otherwise.
         Background tracking handles open/partial orders.
         """
+        # 0. Hard killswitch — short-circuits everything. Survives restart.
+        from risk import killswitch
+        if killswitch.is_tripped():
+            info = killswitch.get_trip_info() or {}
+            log.warning(
+                f"Order REJECTED [KILLSWITCH: {info.get('reason','?')}]: "
+                f"{order.strategy} {order.side} {order.token_id[:8]}"
+            )
+            return None
+
         # 1. Duplicate prevention
         if is_duplicate(order.token_id, order.side):
             log.debug(f"Duplicate blocked: {order.side} {order.token_id[:8]}")
@@ -195,9 +205,28 @@ class ExecutionGateway:
         register_inflight(order.token_id, order.side)
 
         if config.DRY_RUN:
-            fill = self._simulate_fill(order)
-            await self._fill_bus.put(fill)
-            return fill
+            # Shadow-Live path: realistic fill via live orderbook walk,
+            # persisted to virtual_trades, drift samples scheduled.
+            try:
+                from shadow.virtual_executor import virtual_execute
+                from shadow.drift_tracker import schedule_drift_samples
+                self._submitted_count += 1
+                fill, trade_id = await virtual_execute(order, self._store)
+                # Mirror position/bankroll bookkeeping so the existing
+                # consumer sees consistent state.
+                self._apply_dry_run_bookkeeping(order, fill)
+                # Schedule post-fill drift samplers (adverse selection)
+                if trade_id is not None:
+                    asyncio.create_task(
+                        schedule_drift_samples(trade_id, order.token_id, self._store)
+                    )
+                await self._fill_bus.put(fill)
+                return fill
+            except Exception as e:
+                log.warning(f"[shadow] virtual_execute failed, falling back: {e}")
+                fill = self._simulate_fill(order)
+                await self._fill_bus.put(fill)
+                return fill
 
         # Maker-first: non-IMMEDIATE signals post GTC limit (0% fee), fall back to taker after 60s
         urgency = signal.urgency if signal else "HIGH"
@@ -206,9 +235,72 @@ class ExecutionGateway:
 
         return await self._submit_live(order, signal)
 
+    def _apply_dry_run_bookkeeping(self, order: Order, fill: Fill) -> None:
+        """
+        Update portfolio bankroll + positions for a (virtual) DRY_RUN fill.
+        Shared by naive _simulate_fill and shadow virtual_execute paths so
+        both keep the portfolio state consistent.
+        """
+        from core.models import Position
+        shares = fill.fill_size
+        fee = fill.fee_paid
+        key = order.token_id
+        if order.side == "BUY":
+            self._portfolio.bankroll -= fill.fill_price * shares + fee
+            if key in self._portfolio.positions:
+                existing = self._portfolio.positions[key]
+                total_shares = existing.size_shares + shares
+                avg_price = (
+                    (existing.avg_entry_price * existing.size_shares + fill.fill_price * shares)
+                    / total_shares
+                )
+                self._portfolio.positions[key] = existing.model_copy(update={
+                    "size_shares": total_shares,
+                    "avg_entry_price": avg_price,
+                    "current_price": fill.fill_price,
+                })
+            else:
+                from core.category import effective_category as _eff_cat
+                _mkt = self._store.get_market(order.condition_id) if self._store else None
+                self._portfolio.positions[key] = Position(
+                    condition_id=order.condition_id,
+                    token_id=order.token_id,
+                    side="BUY",
+                    size_shares=shares,
+                    avg_entry_price=fill.fill_price,
+                    current_price=fill.fill_price,
+                    strategy=order.strategy or "",
+                    category=_eff_cat(_mkt) if _mkt else "",
+                )
+        else:
+            self._portfolio.bankroll += fill.fill_price * shares - fee
+            if key in self._portfolio.positions:
+                existing = self._portfolio.positions[key]
+                new_size = existing.size_shares - shares
+                realized = (fill.fill_price - existing.avg_entry_price) * shares - fee
+                self._portfolio.realized_pnl += realized
+                if new_size <= 0.001:
+                    del self._portfolio.positions[key]
+                else:
+                    self._portfolio.positions[key] = existing.model_copy(update={
+                        "size_shares": new_size,
+                        "current_price": fill.fill_price,
+                    })
+        if self._portfolio.total_value > self._portfolio.peak_value:
+            self._portfolio.peak_value = self._portfolio.total_value
+        log.info(
+            f"[SHADOW] {order.side} ${order.size_usd:.2f} @ {fill.fill_price:.4f} "
+            f"(mid→fill slip={abs(fill.fill_price - order.price)*100:.2f}¢) "
+            f"| {order.strategy} | fee=${fee:.4f} | bankroll=${self._portfolio.bankroll:.2f}"
+        )
+        db.insert_trade(
+            fill.order_id, fill.condition_id, fill.token_id,
+            fill.side, fill.fill_price, fill.fill_size,
+            fill.fee_paid, order.strategy,
+        )
+
     def _simulate_fill(self, order: Order) -> Fill:
-        """Paper trading — assume immediate full fill at order price."""
-        self._submitted_count += 1
+        """Naive paper-trading fallback — used only if shadow path fails."""
         shares = order.size_usd / order.price
         fee = order.price * (1 - order.price) * config.TAKER_FEE_RATE * shares
         fill = Fill(
@@ -219,16 +311,9 @@ class ExecutionGateway:
             fill_price=order.price,
             fill_size=shares,
             fee_paid=fee,
+            strategy=order.strategy or "",
         )
-        log.info(
-            f"[DRY RUN] {order.side} ${order.size_usd:.2f} @ {order.price:.4f} "
-            f"| {order.strategy} | fee=${fee:.4f}"
-        )
-        db.insert_trade(
-            fill.order_id, fill.condition_id, fill.token_id,
-            fill.side, fill.fill_price, fill.fill_size,
-            fill.fee_paid, order.strategy,
-        )
+        self._apply_dry_run_bookkeeping(order, fill)
         return fill
 
     async def _submit_maker_first(self, order: Order, signal: Optional[Signal] = None) -> Optional[Fill]:
