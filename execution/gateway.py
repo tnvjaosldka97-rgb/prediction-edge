@@ -418,18 +418,96 @@ class ExecutionGateway:
             log.warning(f"Maker-first failed ({e}), falling back to taker")
             return await self._submit_live(order, signal)
 
+    def _book_snapshot_json(self, token_id: str) -> Optional[str]:
+        """LIVE 주문 시 호가창 best 5단계 캡처. friction_traces 분석용."""
+        if not self._store:
+            return None
+        try:
+            import json
+            book = self._store.get_orderbook(token_id)
+            if not book:
+                return None
+            return json.dumps({
+                "ts": book.timestamp,
+                "bids": [(p, s) for p, s in book.bids[:5]],
+                "asks": [(p, s) for p, s in book.asks[:5]],
+            })
+        except Exception:
+            return None
+
+    def _record_friction_trace(
+        self,
+        order: Order,
+        submit_ts: float,
+        *,
+        ack_ts: Optional[float] = None,
+        fill_ts: Optional[float] = None,
+        order_id: Optional[str] = None,
+        fill_price: Optional[float] = None,
+        fill_size_shares: Optional[float] = None,
+        fee_paid: Optional[float] = None,
+        rejection_reason: Optional[str] = None,
+        api_error_text: Optional[str] = None,
+        is_partial: bool = False,
+        retry_count: int = 0,
+        book_snapshot: Optional[str] = None,
+    ) -> None:
+        """LIVE 주문 lifecycle을 friction_traces 테이블에 기록. 실패해도 거래 흐름 안 끊음."""
+        try:
+            fill_size_usd = (fill_size_shares * fill_price) if (fill_size_shares and fill_price) else None
+            slippage_bps = None
+            if fill_price is not None and order.price > 0:
+                slippage_bps = abs(fill_price - order.price) / order.price * 10000
+            submit_to_fill_ms = (fill_ts - submit_ts) * 1000 if (fill_ts and submit_ts) else None
+
+            db.insert_friction_trace({
+                "order_id": order_id or f"local_{int(submit_ts * 1000)}",
+                "condition_id": order.condition_id,
+                "token_id": order.token_id,
+                "strategy": order.strategy or "",
+                "side": order.side,
+                "order_type": order.order_type,
+                "is_maker": 0,  # _submit_live 경로는 항상 taker (maker는 _submit_maker_first에서 처리)
+                "submit_ts": submit_ts,
+                "ack_ts": ack_ts,
+                "fill_ts": fill_ts,
+                "requested_price": order.price,
+                "requested_size_usd": order.size_usd,
+                "normalized_price": order.price,
+                "fill_price": fill_price,
+                "fill_size_usd": fill_size_usd,
+                "fill_size_shares": fill_size_shares,
+                "fee_paid": fee_paid,
+                "rejection_reason": rejection_reason,
+                "submit_to_fill_ms": submit_to_fill_ms,
+                "slippage_bps": slippage_bps,
+                "is_partial": 1 if is_partial else 0,
+                "network_blip_during": 0,
+                "levels_consumed": None,
+                "book_snapshot_json": book_snapshot or self._book_snapshot_json(order.token_id),
+                "api_error_text": api_error_text,
+                "retry_count": retry_count,
+            })
+        except Exception as e:
+            log.warning(f"[friction_trace] record failed: {e}")
+
     async def _submit_live(self, order: Order, signal: Optional[Signal] = None) -> Optional[Fill]:
         """
         Submit real order to Polymarket CLOB.
         - Retries up to 3x with exponential backoff on 429/5xx
         - Immediate 4xx = permanent rejection, no retry
         - If order is open (no immediate fill), spawns OrderTracker
+        - Records friction_trace for every outcome (calibration data)
         """
         if not self._clob_client:
             self._init_clob_client()
         if not self._clob_client:
             log.error("CLOB client not available")
             return None
+
+        submit_ts = time.time()
+        book_snapshot = self._book_snapshot_json(order.token_id)
+        last_error_text: Optional[str] = None
 
         for attempt in range(3):
             try:
@@ -449,6 +527,8 @@ class ExecutionGateway:
                 # Register with reconciler
                 if self._reconciler and order_id:
                     self._reconciler.register_order(order_id)
+
+                ack_ts = time.time()
 
                 # Immediate full fill
                 if size_matched > 0:
@@ -471,6 +551,15 @@ class ExecutionGateway:
                     self._submitted_count += 1
                     if self._reconciler:
                         self._reconciler.confirm_fill(order_id)
+                    # friction_trace 기록 — fill 케이스
+                    is_partial = size_matched * fill_price < order.size_usd * 0.99
+                    self._record_friction_trace(
+                        order, submit_ts,
+                        ack_ts=ack_ts, fill_ts=ack_ts, order_id=order_id,
+                        fill_price=fill_price, fill_size_shares=size_matched, fee_paid=fee,
+                        is_partial=is_partial, retry_count=attempt,
+                        book_snapshot=book_snapshot,
+                    )
                     log.info(
                         f"[FILL] {order.side} {size_matched:.4f}sh @ {fill_price:.4f} "
                         f"| ${size_matched * fill_price:.2f} | fee=${fee:.4f} | {order.strategy}"
@@ -487,24 +576,54 @@ class ExecutionGateway:
                     tracker = OrderTracker(order, signal, self._clob_client, self._fill_bus)
                     asyncio.create_task(tracker.run(order_id), name=f"tracker_{order_id[:8]}")
 
+                # friction_trace 기록 — open/no-fill 케이스 (이건 fill_ts 없음)
+                self._record_friction_trace(
+                    order, submit_ts,
+                    ack_ts=ack_ts, order_id=order_id,
+                    rejection_reason="opened_no_immediate_fill" if not size_matched else None,
+                    retry_count=attempt, book_snapshot=book_snapshot,
+                )
                 return None
 
             except Exception as e:
                 err = str(e)
+                last_error_text = err[:200]
                 if "429" in err:
                     wait = (2 ** attempt) * 2
                     log.warning(f"Rate limited (429), backoff {wait}s (attempt {attempt+1}/3)")
                     await asyncio.sleep(wait)
                 elif any(c in err for c in ["400", "401", "403", "404"]):
                     log.error(f"Order rejected by CLOB ({err[:60]})")
+                    self._record_friction_trace(
+                        order, submit_ts,
+                        rejection_reason=f"clob_4xx",
+                        api_error_text=last_error_text,
+                        retry_count=attempt,
+                        book_snapshot=book_snapshot,
+                    )
                     return None
                 else:
                     log.error(f"Submit error attempt {attempt+1}/3: {err[:80]}")
                     if attempt < 2:
                         await asyncio.sleep(2 ** attempt)
                     else:
+                        self._record_friction_trace(
+                            order, submit_ts,
+                            rejection_reason="exhausted_retries",
+                            api_error_text=last_error_text,
+                            retry_count=attempt,
+                            book_snapshot=book_snapshot,
+                        )
                         return None
 
+        # 최종 실패 기록
+        self._record_friction_trace(
+            order, submit_ts,
+            rejection_reason="rate_limit_exhausted",
+            api_error_text=last_error_text,
+            retry_count=2,
+            book_snapshot=book_snapshot,
+        )
         return None
 
     async def submit_quote(self, order: Order) -> tuple[Optional[Fill], Optional[str]]:

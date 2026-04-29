@@ -244,6 +244,62 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_virtual_trades_strategy ON virtual_trades(strategy, fill_ts);
     CREATE INDEX IF NOT EXISTS idx_virtual_trades_unresolved ON virtual_trades(resolved_at) WHERE resolved_at IS NULL;
 
+    -- Friction traces — every LIVE order's full lifecycle for calibration.
+    -- friction.calibrate.py reads this table to update model parameters.
+    CREATE TABLE IF NOT EXISTS friction_traces (
+        order_id            TEXT PRIMARY KEY,
+        condition_id        TEXT,
+        token_id            TEXT,
+        strategy            TEXT,
+        side                TEXT,
+        order_type          TEXT,
+        is_maker            INTEGER,
+        submit_ts           REAL NOT NULL,
+        ack_ts              REAL,
+        fill_ts             REAL,
+        requested_price     REAL,
+        requested_size_usd  REAL,
+        normalized_price    REAL,
+        fill_price          REAL,
+        fill_size_usd       REAL,
+        fill_size_shares    REAL,
+        fee_paid            REAL,
+        rejection_reason    TEXT,                  -- NULL = filled
+        submit_to_fill_ms   REAL,
+        slippage_bps        REAL,
+        is_partial          INTEGER,
+        network_blip_during INTEGER DEFAULT 0,
+        levels_consumed     INTEGER,
+        book_snapshot_json  TEXT,                  -- best 5 levels at submit
+        api_error_text      TEXT,                  -- raw error from CLOB if rejected
+        retry_count         INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_friction_submit_ts ON friction_traces(submit_ts);
+    CREATE INDEX IF NOT EXISTS idx_friction_strategy ON friction_traces(strategy, submit_ts);
+    CREATE INDEX IF NOT EXISTS idx_friction_rejection ON friction_traces(rejection_reason) WHERE rejection_reason IS NOT NULL;
+
+    -- Friction calibration snapshots — versioned model params.
+    CREATE TABLE IF NOT EXISTS friction_calibration (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp       REAL NOT NULL,
+        n_traces_used   INTEGER NOT NULL,
+        params_json     TEXT NOT NULL,            -- friction.orchestrator.to_dict()
+        notes           TEXT
+    );
+
+    -- Audit log — every dashboard control action (mode toggle, kill, etc.)
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp       REAL NOT NULL,
+        actor           TEXT,                      -- 'admin' or username
+        action          TEXT NOT NULL,             -- 'mode_change', 'emergency_stop', etc.
+        before_state    TEXT,                      -- JSON
+        after_state     TEXT,                      -- JSON
+        ip_address      TEXT,
+        user_agent      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(timestamp);
+
     CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON portfolio_snapshots(timestamp);
     CREATE INDEX IF NOT EXISTS idx_price_history_token ON price_history(token_id, timestamp);
     CREATE INDEX IF NOT EXISTS idx_signals_strategy ON signals(strategy, created_at);
@@ -481,6 +537,108 @@ def get_snapshots(limit: int = 2000) -> list:
     return conn.execute(
         "SELECT timestamp, total_value, bankroll, unrealized, realized, positions FROM portfolio_snapshots ORDER BY timestamp ASC"
     ).fetchall()
+
+
+def insert_friction_trace(trace: dict) -> None:
+    """LIVE 주문의 전체 lifecycle을 friction_traces 테이블에 기록.
+
+    trace dict 키 (필수/선택):
+      order_id*, submit_ts*, condition_id, token_id, strategy, side, order_type,
+      is_maker, ack_ts, fill_ts, requested_price, requested_size_usd,
+      normalized_price, fill_price, fill_size_usd, fill_size_shares, fee_paid,
+      rejection_reason, submit_to_fill_ms, slippage_bps, is_partial,
+      network_blip_during, levels_consumed, book_snapshot_json, api_error_text, retry_count
+    """
+    conn = get_conn()
+    cols = [
+        "order_id", "condition_id", "token_id", "strategy", "side", "order_type",
+        "is_maker", "submit_ts", "ack_ts", "fill_ts", "requested_price",
+        "requested_size_usd", "normalized_price", "fill_price", "fill_size_usd",
+        "fill_size_shares", "fee_paid", "rejection_reason", "submit_to_fill_ms",
+        "slippage_bps", "is_partial", "network_blip_during", "levels_consumed",
+        "book_snapshot_json", "api_error_text", "retry_count",
+    ]
+    placeholders = ",".join("?" * len(cols))
+    values = tuple(trace.get(c) for c in cols)
+    try:
+        conn.execute(
+            f"INSERT OR REPLACE INTO friction_traces ({','.join(cols)}) VALUES ({placeholders})",
+            values,
+        )
+        conn.commit()
+    except Exception as e:
+        # trace 저장 실패가 거래 자체를 망가뜨리면 안 됨 — 로그만
+        from core.logger import log
+        log.warning(f"[friction_trace] insert failed: {e}")
+
+
+def get_friction_traces(since_ts: float = 0, limit: int = 5000) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM friction_traces WHERE submit_ts >= ? ORDER BY submit_ts DESC LIMIT ?",
+        (since_ts, limit),
+    ).fetchall()
+    return [dict(r) for r in rows] if rows else []
+
+
+def insert_friction_calibration(n_traces: int, params: dict, notes: str = "") -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO friction_calibration (timestamp, n_traces_used, params_json, notes) "
+        "VALUES (?, ?, ?, ?)",
+        (time.time(), n_traces, json.dumps(params), notes),
+    )
+    conn.commit()
+
+
+def get_latest_friction_calibration() -> dict | None:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT timestamp, n_traces_used, params_json, notes "
+        "FROM friction_calibration ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "timestamp": row[0],
+        "n_traces_used": row[1],
+        "params": json.loads(row[2]),
+        "notes": row[3],
+    }
+
+
+def insert_audit_log(actor: str, action: str, before: dict | None,
+                     after: dict | None, ip: str = "", ua: str = "") -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO audit_log (timestamp, actor, action, before_state, after_state, ip_address, user_agent) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            time.time(), actor, action,
+            json.dumps(before) if before else None,
+            json.dumps(after) if after else None,
+            ip, ua,
+        ),
+    )
+    conn.commit()
+
+
+def get_audit_log(limit: int = 200) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT timestamp, actor, action, before_state, after_state, ip_address "
+        "FROM audit_log ORDER BY timestamp DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        {
+            "timestamp": r[0], "actor": r[1], "action": r[2],
+            "before": json.loads(r[3]) if r[3] else None,
+            "after": json.loads(r[4]) if r[4] else None,
+            "ip": r[5],
+        }
+        for r in rows
+    ]
 
 
 def upsert_wallet_stats(address: str, stats: dict) -> None:
