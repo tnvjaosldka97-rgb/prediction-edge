@@ -174,7 +174,9 @@ def compute_kelly(
     # Makers pay 0% fee — use 0 fee_cost regardless of input
     effective_fee = 0.0 if is_maker else fee_cost_per_dollar
     win_per_dollar = (1 - market_price) / market_price   # b in Kelly formula
-    win_after_fees = win_per_dollar - effective_fee / market_price
+    # H2 fix: fee_cost_per_dollar는 이미 투자 $1당 수수료 (= rate * p * (1-p))
+    # win_per_dollar도 투자 $1당 수익이므로 단위 일치 — 나누기 불필요
+    win_after_fees = win_per_dollar - effective_fee
 
     if win_after_fees <= 0:
         return 0.0
@@ -192,8 +194,9 @@ def compute_kelly(
     # Prediction markets: longer horizon = more uncertainty = smaller bet
     # But we don't annualize aggressively — it over-sizes short-term bets
     days = max(1, days_to_resolution)
-    # Gentle boost for short-dated markets (max 4x for same-day markets)
-    time_mult = min(30.0 / days, 4.0)
+    # Gentle boost for short-dated markets (max 2x for same-day markets)
+    # C3 fix: 4x는 full Kelly 초과 → 기하 성장률 음수 (파산 경로). 2x로 제한.
+    time_mult = min(30.0 / days, 2.0)
     adjusted_kelly = full_kelly * time_mult
 
     # Step 6: Apply phase-in fraction × Sharpe multiplier

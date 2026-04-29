@@ -43,8 +43,28 @@ def check_all(
     All checks must pass for the order to be submitted.
     """
 
+    # ── SELL(exit)은 리스크 감소 — 사이징/노출 한도 스킵, 안전 체크만 적용 ──
+    if order.side == "SELL":
+        # Drawdown halt — 극단 상황에서만 전체 중지
+        if portfolio.drawdown >= config.MAX_DRAWDOWN_HALT:
+            return False, f"DRAWDOWN HALT: {portfolio.drawdown:.1%} >= {config.MAX_DRAWDOWN_HALT:.1%}"
+        # Manipulation guard
+        guard = get_guard()
+        if guard.is_rejected(order.token_id):
+            return False, f"MANIPULATION DETECTED: score={guard.get_score(order.token_id):.2f}"
+        # SELL은 일일 카운터만 체크하고 통과
+        global _daily_trade_count, _daily_reset_ts
+        now = time.time()
+        if now - _daily_reset_ts > 86400:
+            _daily_trade_count = 0
+            _daily_reset_ts = now
+        if _daily_trade_count >= MAX_DAILY_TRADES:
+            return False, f"DAILY LIMIT: {_daily_trade_count}/{MAX_DAILY_TRADES} trades today"
+        return True, "ok"
+
+    # ── 이하 BUY 전용 체크 ──────────────────────────────────────────────────
+
     # 0. 일일 트레이드 한도
-    global _daily_trade_count, _daily_reset_ts
     now = time.time()
     if now - _daily_reset_ts > 86400:
         _daily_trade_count = 0

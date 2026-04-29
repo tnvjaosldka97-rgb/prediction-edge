@@ -166,6 +166,7 @@ SignalStrategy = Literal[
     "news_alpha",
     "claude_oracle",
     "base_rate",
+    "exit_signal",
 ]
 
 class Signal(BaseModel):

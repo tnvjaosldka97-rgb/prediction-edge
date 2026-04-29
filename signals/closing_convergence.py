@@ -131,8 +131,9 @@ def _compute_convergence_signal(
     if market.dispute_risk > config.ORACLE_DISPUTE_THRESHOLD_WARN:
         if market.dispute_risk > config.ORACLE_DISPUTE_THRESHOLD_SKIP:
             return None
-        # Use dispute risk to reduce effective model probability
-        dispute_haircut = market.dispute_risk * 0.5  # N/A resolution → 0.5
+        # M4 fix: dispute 중간 구간에서 model_prob 감산 적용
+        # (아래 model_prob 계산 후 적용됨 — 여기서는 flag만 설정)
+        pass  # haircut applied at line 183-184 for all dispute_risk > 0
 
     # Determine direction
     if price >= _MIN_PRICE_FOR_CONVERGENCE:

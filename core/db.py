@@ -320,6 +320,8 @@ _STRATEGY_PRIORS: dict[str, dict] = {
     "claude_oracle":       {"accuracy": 0.50,  "calib_error": 0.30, "n": 3},
     # base_rate: 백테스트 미실행, 보수적 유지
     "base_rate":           {"accuracy": 0.55,  "calib_error": 0.18, "n": 5},
+    # exit_signal: 포지션 청산 — 높은 정확도 예상
+    "exit_signal":         {"accuracy": 0.80,  "calib_error": 0.04, "n": 10},
 }
 _DEFAULT_PRIOR = {"accuracy": 0.60, "calib_error": 0.05, "n": 10}
 
@@ -471,6 +473,11 @@ def insert_snapshot(total_value: float, bankroll: float, unrealized: float, real
 
 def get_snapshots(limit: int = 2000) -> list:
     conn = get_conn()
+    if limit and limit > 0:
+        return conn.execute(
+            "SELECT timestamp, total_value, bankroll, unrealized, realized, positions FROM portfolio_snapshots ORDER BY timestamp ASC LIMIT ?",
+            (limit,)
+        ).fetchall()
     return conn.execute(
         "SELECT timestamp, total_value, bankroll, unrealized, realized, positions FROM portfolio_snapshots ORDER BY timestamp ASC"
     ).fetchall()

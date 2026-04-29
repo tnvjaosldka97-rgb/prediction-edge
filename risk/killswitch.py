@@ -48,9 +48,14 @@ _daily_reset_ts = 0.0
 
 
 def _reset_daily_if_needed() -> None:
+    """M5 fix: 자정(UTC) 기준 리셋 — 롤링 86400s 대신 달력 일자."""
     global _daily_realized_loss, _daily_reset_ts
+    import datetime
     now = time.time()
-    if now - _daily_reset_ts > 86400:
+    today_start = datetime.datetime.utcnow().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+    if _daily_reset_ts < today_start:
         _daily_realized_loss = 0.0
         _daily_reset_ts = now
 
@@ -111,6 +116,8 @@ def record_trade_result(pnl_usd: float) -> None:
         _daily_realized_loss += -pnl_usd
     else:
         _consecutive_losses = 0
+        # C4 fix: 수익도 차감 — net daily loss 기준으로 killswitch 판단
+        _daily_realized_loss = max(0.0, _daily_realized_loss - pnl_usd)
 
     if _consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
         trip(

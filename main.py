@@ -63,9 +63,10 @@ async def fill_consumer(fill_bus: asyncio.Queue, portfolio: PortfolioState, stor
         if not isinstance(fill, Fill):
             continue
 
-        # DRY_RUN fills: bankroll + positions already handled in gateway._simulate_fill()
-        # Skip everything except peak_value update and snapshot
-        is_dry = fill.order_id.startswith("dry_")
+        # DRY_RUN fills: bankroll + positions already handled in gateway._apply_dry_run_bookkeeping()
+        # Skip everything except peak_value update and snapshot.
+        # Both "dry_" (naive fallback) and "shadow_" (virtual_execute) are DRY_RUN fills.
+        is_dry = fill.order_id.startswith("dry_") or fill.order_id.startswith("shadow_")
 
         if not is_dry:
             # LIVE fills: update positions and bankroll here
@@ -358,31 +359,49 @@ async def process_aggregated_signals(
             log.debug(f"Expired signal dropped: {strategy}")
             continue
 
-        # Kelly sizing — maker orders pay 0% fee (reflected in sizing)
         days = market.days_to_resolution if market else 30.0
         is_maker_order = urgency not in ("IMMEDIATE", "HIGH")
-        fee_per_dollar = 0.0 if is_maker_order else config.TAKER_FEE_RATE * (1 - current_price)
+        fee_per_dollar = 0.0 if is_maker_order else config.TAKER_FEE_RATE * current_price * (1 - current_price)
 
-        # Correlation-aware Kelly: pass portfolio + market identity so
-        # the sizer can shrink correlated exposures (same category, same
-        # event cluster). Prevents ruin from stacked "independent" bets.
-        from core.category import effective_category as _eff_cat
-        size_usd = compute_kelly(
-            model_prob=model_prob,
-            market_price=current_price,
-            bankroll=portfolio.bankroll,
-            days_to_resolution=days,
-            strategy=strategy,
-            fee_cost_per_dollar=fee_per_dollar,
-            is_maker=is_maker_order,
-            portfolio=portfolio,
-            condition_id=condition_id,
-            category=_eff_cat(market) if market else "",
-        )
+        # SELL은 포지션 청산 — Kelly가 아니라 보유 수량에서 사이징.
+        # Kelly는 신규 BUY edge 전제라, exit 시그널(model_prob≈market_price)이면
+        # 항상 0 반환 → 2026-04-14 런에서 exit 134번 전부 스킵된 원인.
+        if direction == "SELL":
+            pos = portfolio.positions.get(token_id)
+            if not pos or pos.size_shares <= 0:
+                log.debug(f"SELL signal but no position: {token_id[:8]}")
+                continue
+            size_usd = pos.size_shares * current_price
+            if size_usd < config.MIN_ORDER_SIZE_USD:
+                log.debug(f"SELL position too small: ${size_usd:.2f} on {token_id[:8]}")
+                continue
+        else:
+            # Correlation-aware Kelly: pass portfolio + market identity so
+            # the sizer can shrink correlated exposures (same category, same
+            # event cluster). Prevents ruin from stacked "independent" bets.
+            from core.category import effective_category as _eff_cat
+            size_usd = compute_kelly(
+                model_prob=model_prob,
+                market_price=current_price,
+                bankroll=portfolio.bankroll,
+                days_to_resolution=days,
+                strategy=strategy,
+                fee_cost_per_dollar=fee_per_dollar,
+                is_maker=is_maker_order,
+                portfolio=portfolio,
+                condition_id=condition_id,
+                category=_eff_cat(market) if market else "",
+            )
 
-        if size_usd < config.MIN_ORDER_SIZE_USD:
-            log.debug(f"Kelly size too small: ${size_usd:.2f} for {strategy}")
-            continue
+            # 저edge reserve — 2026-04-14 런 교훈: fee_arb 3% edge가 첫 10분에
+            # 자본 전부 소진 → 뒤따라온 claude_oracle 48% edge 시그널이 사이즈 0
+            # 으로 starve. edge < 8% 시그널은 bankroll의 50%까지만 사용.
+            if net_edge < 0.08:
+                size_usd = min(size_usd, portfolio.bankroll * 0.5)
+
+            if size_usd < config.MIN_ORDER_SIZE_USD:
+                log.debug(f"Kelly size too small: ${size_usd:.2f} for {strategy}")
+                continue
 
         order = Order(
             condition_id=condition_id,
@@ -408,12 +427,15 @@ async def process_aggregated_signals(
                 no_token = market.no_token
                 no_book = store.get_orderbook(no_token.token_id)
                 if no_book and not no_book.is_stale() and no_book.best_ask > 0:
+                    # C2 fix: YES와 동일 share 수 맞추기 위해 NO leg size_usd 재계산
+                    yes_shares = fill.fill_size  # YES leg에서 받은 실제 share 수
+                    no_size_usd = yes_shares * no_book.best_ask
                     no_order = Order(
                         condition_id=condition_id,
                         token_id=no_token.token_id,
                         side="BUY",
                         price=no_book.best_ask,
-                        size_usd=size_usd,
+                        size_usd=no_size_usd,
                         order_type="FOK",
                         strategy="internal_arb",
                     )
@@ -442,7 +464,15 @@ async def main():
     get_conn()
 
     bankroll = float(os.getenv("BANKROLL", "1000"))
-    portfolio = PortfolioState(bankroll=bankroll, peak_value=bankroll)
+    # H3 fix: peak_value를 DB 스냅샷에서 복원 — 재시작 시 drawdown 보호 유지
+    saved_peak = bankroll
+    try:
+        all_snaps = db.get_snapshots(limit=0)  # 전체
+        if all_snaps:
+            saved_peak = max(bankroll, max(row[1] for row in all_snaps))
+    except Exception:
+        pass
+    portfolio = PortfolioState(bankroll=bankroll, peak_value=saved_peak)
 
     # 시작 즉시 초기 스냅샷 — 자산곡선 첫 점 확보
     try:

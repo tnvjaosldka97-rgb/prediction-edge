@@ -144,7 +144,7 @@ class ExitSignalGenerator:
 
             signal = Signal(
                 signal_id=str(uuid.uuid4()),
-                strategy="closing_convergence",   # reuse existing strategy label
+                strategy="exit_signal",   # H1 fix: 고유 라벨 — closing_convergence BUY와 충돌 방지
                 condition_id=pos.condition_id,
                 token_id=token_id,
                 direction="SELL",

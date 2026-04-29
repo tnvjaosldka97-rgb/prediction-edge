@@ -197,14 +197,18 @@ async def api_closed_trades():
         return []
 
 
-# 전략별 사전확률 (web_server 자체 참조용 — db.py와 동기화 유지)
+# M2 fix: db.py의 _STRATEGY_PRIORS와 동기화 + 누락 전략 추가
 _CAL_PRIORS = {
-    "fee_arbitrage":       {"accuracy": 0.882, "n": 30},
-    "oracle_convergence":  {"accuracy": 0.780, "n": 20},
-    "closing_convergence": {"accuracy": 0.655, "n": 20},
-    "order_flow":          {"accuracy": 0.548, "n": 10},
-    "cross_platform":      {"accuracy": 0.680, "n": 15},
-    "correlated_arb":      {"accuracy": 0.620, "n": 15},
+    "fee_arbitrage":       {"accuracy": 0.97,  "n": 30},
+    "oracle_convergence":  {"accuracy": 0.93,  "n": 20},
+    "closing_convergence": {"accuracy": 0.66,  "n": 20},
+    "order_flow":          {"accuracy": 0.55,  "n": 10},
+    "cross_platform":      {"accuracy": 0.70,  "n": 15},
+    "correlated_arb":      {"accuracy": 0.63,  "n": 15},
+    "limitless_arb":       {"accuracy": 0.68,  "n": 15},
+    "claude_oracle":       {"accuracy": 0.50,  "n": 3},
+    "base_rate":           {"accuracy": 0.55,  "n": 5},
+    "exit_signal":         {"accuracy": 0.80,  "n": 10},
 }
 
 
@@ -256,7 +260,7 @@ async def api_signals():
     try:
         conn = sqlite3.connect(config.DB_PATH)
         rows = conn.execute(
-            "SELECT signal_id, strategy, condition_id, token_id, direction, model_prob, market_prob, net_edge, confidence, urgency, created_at "
+            "SELECT signal_id, strategy, condition_id, token_id, direction, model_prob, market_prob, net_edge, confidence, created_at "
             "FROM signals ORDER BY created_at DESC LIMIT 30"
         ).fetchall()
         conn.close()
@@ -270,8 +274,7 @@ async def api_signals():
                 "market_prob": round(float(r[6] or 0), 4),
                 "net_edge": round(float(r[7] or 0), 4),
                 "confidence": round(float(r[8] or 0), 3),
-                "urgency": r[9],
-                "time": time.strftime("%H:%M:%S", time.localtime(float(r[10] or 0))),
+                "time": time.strftime("%H:%M:%S", time.localtime(float(r[9] or 0))),
             })
         return result
     except Exception:
@@ -783,6 +786,7 @@ async def api_shadow():
                 "resolved": bool(r["resolved_at"]),
             })
 
+        conn.close()
         return {
             "total_trades": len(rows),
             "strategies": strategies,
