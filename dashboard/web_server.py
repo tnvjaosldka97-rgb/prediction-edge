@@ -26,6 +26,13 @@ try:
 except ImportError:
     pass  # graceful — dashboard 없이도 main.py 동작
 
+# Day 6 — friction analytics
+try:
+    from dashboard.friction_panel import router as _friction_router
+    app.include_router(_friction_router)
+except ImportError:
+    pass
+
 # Shared references injected by main.py
 _store = None
 _portfolio = None
