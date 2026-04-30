@@ -677,6 +677,27 @@ async def main():
         name="research_agent"
     ))
 
+    # Day 15: realtime PnL 모니터 (5분 간격, drawdown 알림)
+    from risk.realtime_pnl import pnl_monitor_loop
+    tasks.append(asyncio.create_task(
+        pnl_monitor_loop(portfolio, interval_sec=300),
+        name="realtime_pnl"
+    ))
+
+    # Day 15: profit sweeper (매시간 임계 도달 평가, 사람 승인 필요)
+    from risk.profit_sweeper import profit_sweep_loop
+    tasks.append(asyncio.create_task(
+        profit_sweep_loop(portfolio, interval_sec=3600),
+        name="profit_sweeper"
+    ))
+
+    # Day 15: alpha decay 매일 평가
+    from risk.alpha_decay import alpha_decay_loop
+    tasks.append(asyncio.create_task(
+        alpha_decay_loop(interval_sec=86400),
+        name="alpha_decay"
+    ))
+
     # Shadow-Live mark-to-market loop: every 15 min, check resolved markets
     # and update virtual_trades with realized PnL. Runs only in DRY_RUN
     # since shadow data is only recorded in DRY_RUN path.
