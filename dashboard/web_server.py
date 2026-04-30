@@ -40,6 +40,13 @@ try:
 except ImportError:
     pass
 
+# Day 16 — health check + watchdog
+try:
+    from dashboard.health import router as _health_router
+    app.include_router(_health_router)
+except ImportError:
+    pass
+
 
 # Day 7-B — control panel HTML
 @app.get("/control", response_class=HTMLResponse)

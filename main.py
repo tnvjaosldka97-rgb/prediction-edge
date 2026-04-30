@@ -698,6 +698,28 @@ async def main():
         name="alpha_decay"
     ))
 
+    # Day 16: watchdog — 봇 stuck 감지 (1분 간격)
+    from dashboard.health import watchdog_loop
+    tasks.append(asyncio.create_task(
+        watchdog_loop(interval_sec=60),
+        name="watchdog"
+    ))
+
+    # Day 16: adverse selection 6h 평가
+    from risk.adverse_selection import adverse_selection_loop
+    tasks.append(asyncio.create_task(
+        adverse_selection_loop(interval_sec=21600),
+        name="adverse_selection"
+    ))
+
+    # Day 16: trailing stop / pyramiding manager
+    from signals.trailing_stop import TrailingStopManager
+    _trailing_mgr = TrailingStopManager(portfolio, store, raw_signal_bus)
+    tasks.append(asyncio.create_task(
+        _trailing_mgr.start(),
+        name="trailing_stop"
+    ))
+
     # Shadow-Live mark-to-market loop: every 15 min, check resolved markets
     # and update virtual_trades with realized PnL. Runs only in DRY_RUN
     # since shadow data is only recorded in DRY_RUN path.
