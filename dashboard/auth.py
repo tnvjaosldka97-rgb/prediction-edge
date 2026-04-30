@@ -73,6 +73,17 @@ def issue_session(ip: str = "", ua: str = "") -> str:
     return token
 
 
+def _is_private_ip(ip: str) -> bool:
+    """RFC1918 / CGNAT / Cloud internal proxy IPs."""
+    if not ip:
+        return False
+    return (ip.startswith("10.") or ip.startswith("172.16.") or ip.startswith("172.17.")
+            or ip.startswith("172.18.") or ip.startswith("172.19.") or ip.startswith("172.2")
+            or ip.startswith("172.30.") or ip.startswith("172.31.")
+            or ip.startswith("192.168.") or ip.startswith("100.")    # CGNAT incl Railway
+            or ip == "127.0.0.1" or ip == "localhost")
+
+
 def verify_session(token: str, ip: str = "") -> dict | None:
     """세션 토큰 검증. 유효하면 {issued_at, expires_at, ip} 반환."""
     if not token:
@@ -92,9 +103,12 @@ def verify_session(token: str, ip: str = "") -> dict | None:
         return None
     if time.time() > expires_at_i:
         return None
-    # IP 검증 — 세션 발급 시 IP와 다르면 거부
+    # IP 검증 — 세션 발급 시 IP와 다르면 거부.
+    # 단, Railway/CGNAT 같은 클라우드 프록시는 매 요청마다 internal IP 바뀜 →
+    # 양쪽 모두 private면 IP check 스킵 (HMAC 시그니처가 변조 방지).
     if session_ip and ip and session_ip != ip:
-        return None
+        if not (_is_private_ip(session_ip) and _is_private_ip(ip)):
+            return None
     return {
         "issued_at": issued_at_i,
         "expires_at": expires_at_i,
