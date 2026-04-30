@@ -437,6 +437,29 @@ async def process_aggregated_signals(
                 log.debug(f"Kelly size too small: ${size_usd:.2f} for {strategy}")
                 continue
 
+            # Day 17: Pre-trade Monte Carlo — friction 적용 후 expected return 음수면 reject
+            try:
+                from risk.pretrade_montecarlo import simulate_order
+                book_for_mc = store.get_orderbook(token_id) if store else None
+                if book_for_mc and not book_for_mc.is_stale():
+                    mc = simulate_order(
+                        side=direction,
+                        size_usd=size_usd,
+                        limit_price=current_price,
+                        expected_resolution_price=model_prob,
+                        book=book_for_mc,
+                        n_sims=200,    # 200회 (1000은 라이브 부하)
+                        accept_threshold_pct=0.005,
+                    )
+                    if not mc.accept:
+                        log.info(
+                            f"[pretrade_mc] REJECT {strategy} {direction} ${size_usd:.2f} — {mc.reason} "
+                            f"(expected={mc.expected_pnl_usd:+.4f}, fill_rate={mc.fill_rate:.1%})"
+                        )
+                        continue
+            except Exception as e:
+                log.debug(f"[pretrade_mc] sim error (continuing): {e}")
+
         order = Order(
             condition_id=condition_id,
             token_id=token_id,
@@ -737,6 +760,20 @@ async def main():
     tasks.append(asyncio.create_task(
         backup_loop(interval_sec=86400),
         name="db_backup"
+    ))
+
+    # Day 17: DB 최적화 (매주 1회 — 인덱스·VACUUM·old data archive)
+    from tools.db_optimize import db_optimize_loop
+    tasks.append(asyncio.create_task(
+        db_optimize_loop(interval_sec=7 * 86400),
+        name="db_optimize"
+    ))
+
+    # Day 17: 메모리 모니터링 + 임계 초과 시 재시작
+    from core.memory_monitor import memory_monitor_loop
+    tasks.append(asyncio.create_task(
+        memory_monitor_loop(interval_sec=300, warn_threshold_mb=800, critical_threshold_mb=1200),
+        name="memory_monitor"
     ))
 
     # Shadow-Live mark-to-market loop: every 15 min, check resolved markets
