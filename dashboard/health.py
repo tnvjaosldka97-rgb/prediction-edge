@@ -80,27 +80,51 @@ async def health_check():
 # ── Watchdog ─────────────────────────────────────────────────────────────────
 
 class Watchdog:
-    """봇 활동 모니터. 5분간 신호·snapshot 없으면 stuck."""
+    """봇 활동 모니터. DB의 portfolio_snapshots/signals 직접 조회 (heartbeat 의존 X).
+
+    이전에는 heartbeat_signal/snapshot 호출에 의존했으나, 호출하는 곳이 없어서
+    항상 false alarm 발생 → DB 직접 조회로 변경 (self-correcting).
+    """
 
     def __init__(self):
-        self._last_signal_ts = time.time()
-        self._last_snapshot_ts = time.time()
         self._last_alert_ts = 0
 
     def heartbeat_signal(self):
-        self._last_signal_ts = time.time()
+        """Backward compat — 더 이상 사용 X (DB 직접 조회)."""
+        pass
 
     def heartbeat_snapshot(self):
-        self._last_snapshot_ts = time.time()
+        """Backward compat — 더 이상 사용 X (DB 직접 조회)."""
+        pass
 
     def is_stuck(self) -> tuple[bool, str]:
         now = time.time()
-        signal_age = now - self._last_signal_ts
-        snap_age = now - self._last_snapshot_ts
-        if snap_age > 600:    # 10분
-            return True, f"snapshot_stale_{int(snap_age)}s"
-        if signal_age > 1800:    # 30분
-            return True, f"signal_stale_{int(signal_age)}s"
+        try:
+            conn = sqlite3.connect(config.DB_PATH, timeout=2.0)
+            snap_row = conn.execute(
+                "SELECT MAX(timestamp) FROM portfolio_snapshots"
+            ).fetchone()
+            sig_row = conn.execute(
+                "SELECT MAX(created_at) FROM signals"
+            ).fetchone()
+            conn.close()
+        except Exception:
+            return False, ""    # DB 접근 자체가 실패하면 다른 모니터가 잡음
+
+        snap_ts = snap_row[0] if snap_row else None
+        sig_ts = sig_row[0] if sig_row else None
+
+        if snap_ts:
+            snap_age = now - snap_ts
+            if snap_age > 600:    # 10분
+                return True, f"snapshot_stale_{int(snap_age)}s"
+
+        # signal stale은 더 관대 (시그널 조건 안 맞으면 자연스럽게 안 생성)
+        if sig_ts:
+            sig_age = now - sig_ts
+            if sig_age > 7200:    # 2시간 — 더 보수적
+                return True, f"signal_stale_{int(sig_age)}s"
+
         return False, ""
 
 
