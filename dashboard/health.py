@@ -60,7 +60,8 @@ async def health_check():
     try:
         from pathlib import Path
         import json
-        state_file = Path(__file__).resolve().parent.parent / "runtime_state.json"
+        _root = Path(__file__).resolve().parent.parent
+        state_file = (Path("/data") if Path("/data").exists() else _root) / "runtime_state.json"
         if state_file.exists():
             state = json.loads(state_file.read_text(encoding="utf-8"))
             health_data["mode"] = state.get("mode", "unknown")

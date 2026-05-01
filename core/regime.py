@@ -141,7 +141,8 @@ async def regime_loop(interval_sec: int = 21600):
     from pathlib import Path
     from core.logger import log
 
-    state_file = Path(__file__).resolve().parent.parent / "runtime_state.json"
+    _root = Path(__file__).resolve().parent.parent
+    state_file = (Path("/data") if Path("/data").exists() else _root) / "runtime_state.json"
     last_regime = None
 
     while True:

@@ -22,7 +22,9 @@ import time
 from pathlib import Path
 
 
-_PROTECTION_FILE = Path(__file__).resolve().parent.parent / "protection_state.json"
+_ROOT = Path(__file__).resolve().parent.parent
+_DATA_DIR = Path("/data") if Path("/data").exists() else _ROOT
+_PROTECTION_FILE = _DATA_DIR / "protection_state.json"
 _PROTECTION_DURATION_DAYS = 30
 
 

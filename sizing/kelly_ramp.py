@@ -21,7 +21,9 @@ from pathlib import Path
 import config
 
 
-_STATE_FILE = Path(__file__).resolve().parent.parent / "kelly_ramp_state.json"
+_ROOT = Path(__file__).resolve().parent.parent
+_DATA_DIR = Path("/data") if Path("/data").exists() else _ROOT
+_STATE_FILE = _DATA_DIR / "kelly_ramp_state.json"
 
 # Ramp-up schedule — n_safe_trades → multiplier
 SCHEDULE = [

@@ -24,7 +24,8 @@ import config
 
 
 ROOT = Path(__file__).resolve().parent.parent
-STATE_FILE = ROOT / "runtime_state.json"
+_DATA_DIR = Path("/data") if Path("/data").exists() else ROOT
+STATE_FILE = _DATA_DIR / "runtime_state.json"
 
 
 def _load_state() -> dict:

@@ -154,7 +154,9 @@ async def portfolio_metrics(_: dict = Depends(auth.require_admin), window_days: 
 async def strategy_eval(_: dict = Depends(auth.require_admin), window_days: float = 7):
     """전략별 자동 비활성화 평가."""
     from risk.strategy_disabler import evaluate_strategy
-    state_path = __import__("pathlib").Path(__file__).resolve().parent.parent / "runtime_state.json"
+    _root = __import__("pathlib").Path(__file__).resolve().parent.parent
+    _Path = __import__("pathlib").Path
+    state_path = (_Path("/data") if _Path("/data").exists() else _root) / "runtime_state.json"
     if state_path.exists():
         import json
         state = json.loads(state_path.read_text(encoding="utf-8"))

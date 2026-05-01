@@ -26,7 +26,9 @@ from risk import killswitch
 
 
 ROOT = Path(__file__).resolve().parent.parent
-STATE_FILE = ROOT / "runtime_state.json"
+# Railway 영구 볼륨 (/data) 사용. 로컬 dev는 ROOT 사용.
+_DATA_DIR = Path("/data") if Path("/data").exists() else ROOT
+STATE_FILE = _DATA_DIR / "runtime_state.json"
 
 
 Mode = Literal["DRY_RUN", "SHADOW", "LIVE_PILOT", "LIVE_FULL"]

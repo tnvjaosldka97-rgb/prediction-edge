@@ -82,7 +82,8 @@ def execute_action(action: ProtocolAction) -> bool:
             # runtime_state.json에 halt 플래그
             import json
             from pathlib import Path
-            sf = Path(__file__).resolve().parent.parent / "runtime_state.json"
+            _root = Path(__file__).resolve().parent.parent
+            sf = (Path("/data") if Path("/data").exists() else _root) / "runtime_state.json"
             state = json.loads(sf.read_text(encoding="utf-8")) if sf.exists() else {}
             state["new_entries_halted"] = True
             state["halt_reason"] = action.reason
