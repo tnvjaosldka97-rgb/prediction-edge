@@ -43,8 +43,15 @@ class LPMeanReversionScanner:
 
                 markets = self._store.get_active_markets()
                 for m in markets[:200]:
+                    # ── 위험 마켓 필터 (Day 21 버그픽스) ──────────────────
+                    if m.days_to_resolution < 1.0:
+                        continue
+                    if m.dispute_risk > 0.15:
+                        continue
                     for token in m.tokens:
                         token_id = token.token_id
+                        if token.price < 0.05 or token.price > 0.95:
+                            continue
                         book = self._store.get_orderbook(token_id)
                         if not book or book.is_stale():
                             continue

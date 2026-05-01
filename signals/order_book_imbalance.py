@@ -49,8 +49,17 @@ class OrderBookImbalanceScanner:
 
                 markets = self._store.get_active_markets()
                 for m in markets[:200]:
+                    # ── 위험 마켓 필터 (Day 21 버그픽스) ──────────────────
+                    # 만기 임박 + 저가 = lottery ticket 회피
+                    if m.days_to_resolution < 1.0:
+                        continue    # 1일 내 만기 X
+                    if m.dispute_risk > 0.15:
+                        continue    # 분쟁 위험 높음 X
                     for token in m.tokens:
                         token_id = token.token_id
+                        # 가격 0.05 미만 또는 0.95 초과 = 극단 = momentum 의미 X
+                        if token.price < 0.05 or token.price > 0.95:
+                            continue
                         book = self._store.get_orderbook(token_id)
                         if not book or book.is_stale():
                             continue
