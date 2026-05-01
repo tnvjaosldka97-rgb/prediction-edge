@@ -301,6 +301,18 @@ class ExecutionGateway:
 
     def _simulate_fill(self, order: Order) -> Fill:
         """Naive paper-trading fallback — used only if shadow path fails."""
+        if order.price <= 0:
+            log.error(f"[_simulate_fill] order.price={order.price} <= 0 — cannot fill {order.token_id[:8]}")
+            return Fill(
+                order_id=f"dry_invalid_{self._submitted_count}",
+                condition_id=order.condition_id,
+                token_id=order.token_id,
+                side=order.side,
+                fill_price=0.0,
+                fill_size=0.0,
+                fee_paid=0.0,
+                strategy=order.strategy or "",
+            )
         shares = order.size_usd / order.price
         fee = order.price * (1 - order.price) * config.TAKER_FEE_RATE * shares
         fill = Fill(

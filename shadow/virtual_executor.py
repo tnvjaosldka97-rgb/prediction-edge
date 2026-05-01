@@ -55,13 +55,13 @@ def walk_orderbook(
     levels = book.asks if side == "BUY" else book.bids
     if not levels:
         # No book → degenerate, use mid + wide penalty
-        mid = book.mid_price if book.mid_price else 0.5
+        mid = book.mid if book.mid else 0.5
         return (mid + 0.02 if side == "BUY" else mid - 0.02), 0.02, 0.0, 0
 
     # Synthetic book detection (market_store uses 500 as sentinel)
     top_size = levels[0][1]
     if top_size >= 490 and len(levels) <= 1:
-        mid = book.mid_price or levels[0][0]
+        mid = book.mid or levels[0][0]
         return (levels[0][0] + 0.01 if side == "BUY" else levels[0][0] - 0.01), 0.01, 0.0, 1
 
     top_price = levels[0][0]
@@ -248,7 +248,7 @@ async def virtual_execute(
     if order.order_type == "GTC" and book and not book.is_stale():
         try:
             from friction.maker_rest import simulate_maker_rest
-            mid = book.mid_price or order.price
+            mid = book.mid or order.price
             recent_vol = abs(mid - order.price) / max(0.001, mid)    # 단순 vol proxy
             rest = simulate_maker_rest(
                 side=order.side,
@@ -338,7 +338,7 @@ async def virtual_execute(
         levels = sim.levels_consumed
         fee = sim.fee_paid
 
-        mid = book.mid_price or order.price
+        mid = book.mid or order.price
         ask = book.best_ask or order.price
         bid = book.best_bid or order.price
         snap = {
@@ -384,7 +384,7 @@ async def virtual_execute(
         # friction 모듈 없음 → 기존 walk_orderbook 폴백
         fill_price, slippage, shares, levels = walk_orderbook(book, order.side, order.size_usd)
         fee = fill_price * (1 - fill_price) * config.TAKER_FEE_RATE * shares
-        mid = book.mid_price or order.price
+        mid = book.mid or order.price
         ask = book.best_ask or order.price
         bid = book.best_bid or order.price
         snap = {

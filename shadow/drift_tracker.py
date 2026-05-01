@@ -29,7 +29,7 @@ async def schedule_drift_samples(
         try:
             book = store.get_orderbook(token_id)
             if book and not book.is_stale():
-                mid = book.mid_price
+                mid = book.mid
                 if mid and mid > 0:
                     record_drift_sample(trade_id, delay, mid)
         except Exception as e:

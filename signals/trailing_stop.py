@@ -54,7 +54,7 @@ class TrailingStopManager:
                     book = self._store.get_orderbook(token_id)
                     if not book or book.is_stale():
                         continue
-                    current = book.mid_price or pos.current_price
+                    current = book.mid if (book.bids and book.asks) else pos.current_price
                     if current <= 0:
                         continue
 

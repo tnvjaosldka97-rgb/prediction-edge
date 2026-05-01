@@ -75,6 +75,9 @@ async def fill_consumer(fill_bus: asyncio.Queue, portfolio: PortfolioState, stor
                 if key in portfolio.positions:
                     existing = portfolio.positions[key]
                     total_shares = existing.size_shares + fill.fill_size
+                    if total_shares <= 0:
+                        log.error(f"[fill_consumer] total_shares={total_shares} <= 0, skipping fill {fill.order_id}")
+                        continue
                     avg_price = (
                         (existing.avg_entry_price * existing.size_shares + fill.fill_price * fill.fill_size)
                         / total_shares
@@ -384,6 +387,25 @@ async def process_aggregated_signals(
             log.debug(f"No price for {token_id[:8]}, skipping")
             continue
 
+        # Day 5 wiring fix: runtime_state.strategies_enabled 실제 적용
+        try:
+            from dashboard.control import load_state as _load_state
+            _state = _load_state()
+            _enabled = _state.get("strategies_enabled", {})
+            if strategy in _enabled and not _enabled[strategy]:
+                log.debug(f"Strategy {strategy} disabled in runtime_state, skipping")
+                continue
+            # bankroll_cap 적용 — LIVE_PILOT 모드에서 자본 한도 강제
+            _mode = _state.get("mode", "DRY_RUN")
+            if _mode in ("LIVE_PILOT", "LIVE_FULL"):
+                _cap = _state.get("bankroll_cap_usd", 1_000_000)
+                if portfolio.bankroll > _cap:
+                    # bankroll이 cap 넘으면 cap만큼만 사용 가능
+                    pass    # size_usd 계산 후 clamp는 아래
+        except Exception:
+            _state = {}
+            _enabled = {}
+
         # Staleness check
         if signal and signal.is_stale(current_price):
             log.debug(f"Stale signal dropped: {strategy} {condition_id[:8]}")
@@ -432,6 +454,15 @@ async def process_aggregated_signals(
             # 으로 starve. edge < 8% 시그널은 bankroll의 50%까지만 사용.
             if net_edge < 0.08:
                 size_usd = min(size_usd, portfolio.bankroll * 0.5)
+
+            # bankroll_cap 적용 — LIVE 모드에서 단일 주문이 cap 넘지 못하게
+            if _state.get("mode") in ("LIVE_PILOT", "LIVE_FULL"):
+                _cap = _state.get("bankroll_cap_usd", 1_000_000)
+                # 한도 = bankroll_cap × 5% (단일 주문 최대 5%)
+                max_per_order = _cap * 0.05
+                if size_usd > max_per_order:
+                    log.info(f"[bankroll_cap] {strategy} size ${size_usd:.2f} → ${max_per_order:.2f} (cap=${_cap})")
+                    size_usd = max_per_order
 
             if size_usd < config.MIN_ORDER_SIZE_USD:
                 log.debug(f"Kelly size too small: ${size_usd:.2f} for {strategy}")

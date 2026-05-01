@@ -95,7 +95,7 @@ async def periodic_mark_loop(stop_event: asyncio.Event, store=None):
                         if store is not None:
                             book = store.get_orderbook(row["token_id"])
                             if book and not book.is_stale():
-                                mid = book.mid_price
+                                mid = book.mid
                                 if mid:
                                     shares = row["size_usd"] / row["fill_price"]
                                     unrealized = (mid - row["fill_price"]) * shares
