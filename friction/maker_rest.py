@@ -39,6 +39,7 @@ def simulate_maker_rest(
     market_volatility_5m: float = 0.0,
     timeout_sec: float = 60.0,
     rng: Optional[random.Random] = None,
+    min_fill_prob: float = 0.30,    # 시뮬에서 너무 박한 거 방지 — 최소 30% 체결
 ) -> MakerRestResult:
     """
     Maker GTC 주문이 timeout_sec 내에 체결될 확률 + 부분 체결 비율 시뮬.
@@ -83,7 +84,7 @@ def simulate_maker_rest(
     # 3. 큐 깊이 영향 (앞에 적을수록 ↑)
     queue_factor = 1.0 / (1 + queue_ahead_usd / 1000)
 
-    fill_prob = min(0.95, distance_factor * vol_factor * queue_factor)
+    fill_prob = max(min_fill_prob, min(0.95, distance_factor * vol_factor * queue_factor))
 
     if r.random() > fill_prob:
         # Timeout으로 cancel — 60초 후 taker 전환 (caller가 재시도)

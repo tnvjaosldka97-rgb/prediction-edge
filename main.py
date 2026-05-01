@@ -492,28 +492,30 @@ async def process_aggregated_signals(
                 log.debug(f"Kelly size too small: ${size_usd:.2f} for {strategy}")
                 continue
 
-            # Day 17: Pre-trade Monte Carlo — friction 적용 후 expected return 음수면 reject
-            try:
-                from risk.pretrade_montecarlo import simulate_order
-                book_for_mc = store.get_orderbook(token_id) if store else None
-                if book_for_mc and not book_for_mc.is_stale():
-                    mc = simulate_order(
-                        side=direction,
-                        size_usd=size_usd,
-                        limit_price=current_price,
-                        expected_resolution_price=model_prob,
-                        book=book_for_mc,
-                        n_sims=200,    # 200회 (1000은 라이브 부하)
-                        accept_threshold_pct=0.005,
-                    )
-                    if not mc.accept:
-                        log.info(
-                            f"[pretrade_mc] REJECT {strategy} {direction} ${size_usd:.2f} — {mc.reason} "
-                            f"(expected={mc.expected_pnl_usd:+.4f}, fill_rate={mc.fill_rate:.1%})"
+            # Day 17: Pre-trade Monte Carlo — LIVE 모드에서만 강제 (DRY_RUN/SHADOW는 시뮬 데이터 모으기 우선)
+            _current_mode = _state.get("mode", "DRY_RUN") if _state else "DRY_RUN"
+            if _current_mode in ("LIVE_PILOT", "LIVE_FULL"):
+                try:
+                    from risk.pretrade_montecarlo import simulate_order
+                    book_for_mc = store.get_orderbook(token_id) if store else None
+                    if book_for_mc and not book_for_mc.is_stale():
+                        mc = simulate_order(
+                            side=direction,
+                            size_usd=size_usd,
+                            limit_price=current_price,
+                            expected_resolution_price=model_prob,
+                            book=book_for_mc,
+                            n_sims=200,
+                            accept_threshold_pct=0.005,
                         )
-                        continue
-            except Exception as e:
-                log.debug(f"[pretrade_mc] sim error (continuing): {e}")
+                        if not mc.accept:
+                            log.info(
+                                f"[pretrade_mc] REJECT {strategy} {direction} ${size_usd:.2f} — {mc.reason} "
+                                f"(expected={mc.expected_pnl_usd:+.4f}, fill_rate={mc.fill_rate:.1%})"
+                            )
+                            continue
+                except Exception as e:
+                    log.debug(f"[pretrade_mc] sim error (continuing): {e}")
 
         order = Order(
             condition_id=condition_id,
