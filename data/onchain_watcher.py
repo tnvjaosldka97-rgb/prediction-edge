@@ -402,6 +402,19 @@ class OnChainWatcher:
             f"| {market.question[:40]}"
         )
 
+        # Day 22: Whale Lag observation 기록 + drift 샘플 스케줄
+        try:
+            from signals.whale_lag import record_whale_trade, schedule_drift_samples
+            obs_id = record_whale_trade(
+                wallet_address=maker, condition_id=market.condition_id,
+                token_id=token_id, side=side, mid_at_trade=current_price,
+                winrate=0.65,    # 추후 wallet_stats에서 가져옴
+                sharpe=wallet_sharpe,
+            )
+            asyncio.create_task(schedule_drift_samples(obs_id, token_id, self._market_store))
+        except Exception as e:
+            log.debug(f"[whale_lag] record error: {e}")
+
         signal = Signal(
             signal_id=str(uuid.uuid4()),
             strategy="copy_trade",
