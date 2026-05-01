@@ -880,6 +880,20 @@ async def main():
         name="lookahead_audit"
     ))
 
+    # Day 20: 일일 자동 리포트 (매일 KST 9시)
+    from core.daily_report import daily_report_loop
+    tasks.append(asyncio.create_task(
+        daily_report_loop(),
+        name="daily_report"
+    ))
+
+    # Day 20: drawdown 자동 대응 프로토콜 (5분 간격)
+    from risk.drawdown_protocol import drawdown_monitor_loop
+    tasks.append(asyncio.create_task(
+        drawdown_monitor_loop(portfolio, interval_sec=300),
+        name="drawdown_protocol"
+    ))
+
     # Shadow-Live mark-to-market loop: every 15 min, check resolved markets
     # and update virtual_trades with realized PnL. Runs only in DRY_RUN
     # since shadow data is only recorded in DRY_RUN path.

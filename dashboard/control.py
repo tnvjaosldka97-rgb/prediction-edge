@@ -134,6 +134,18 @@ async def change_mode(
         if req.confirm_token != "PROMOTE":
             raise HTTPException(400, 'LIVE 진입은 confirm_token="PROMOTE" 필수')
 
+    # 보호 모드 체크 — LIVE_FULL 진입 첫 30일 차단
+    try:
+        from risk.protection_mode import can_change_mode, activate_protection
+        ok, reason = can_change_mode(req.mode)
+        if not ok:
+            raise HTTPException(403, reason)
+        # LIVE_PILOT 첫 진입 시 보호 모드 자동 활성화 (30일)
+        if req.mode == "LIVE_PILOT" and before.get("mode") == "DRY_RUN":
+            activate_protection()
+    except ImportError:
+        pass
+
     state["mode"] = req.mode
     state["modified_by"] = "admin"
     save_state(state)
@@ -170,12 +182,59 @@ async def change_bankroll_cap(
 ):
     state = load_state()
     before = dict(state)
+
+    # 보호 모드 체크 — 첫 30일은 즉시 변경 X
+    try:
+        from risk.protection_mode import can_change_bankroll_cap, log_override_attempt
+        ok, reason = can_change_bankroll_cap()
+        if not ok:
+            # 즉시 변경 X — 24h cooling-off 큐에 등록
+            state.setdefault("pending_bankroll_changes", []).append({
+                "requested_at": time.time(),
+                "apply_at": time.time() + 86400,
+                "new_value": req.bankroll_cap_usd,
+                "current_value": state.get("bankroll_cap_usd"),
+            })
+            save_state(state)
+            log_override_attempt("bankroll_cap_change", reason)
+            ip = request.client.host if request.client else ""
+            db.insert_audit_log("admin", "bankroll_cap_change_pending", before, state, ip, "")
+            return {
+                "ok": False,
+                "queued": True,
+                "reason": reason,
+                "applies_at": time.time() + 86400,
+                "message": "변경 요청 큐에 등록 — 24시간 후 자동 적용. 즉시 적용 불가.",
+            }
+    except ImportError:
+        pass
+
     state["bankroll_cap_usd"] = req.bankroll_cap_usd
     state["modified_by"] = "admin"
     save_state(state)
     ip = request.client.host if request.client else ""
     db.insert_audit_log("admin", "bankroll_cap_change", before, state, ip, "")
     return {"ok": True, "state": state}
+
+
+@router.post("/protection_unlock")
+async def protection_unlock(
+    request: Request,
+    sess: dict = Depends(auth.require_recent_auth),
+):
+    """보호 모드 강제 해제 — confirmation 'I_UNDERSTAND_THE_RISK' 필요."""
+    body = await request.json()
+    confirmation = body.get("confirmation", "")
+    try:
+        from risk.protection_mode import force_unlock
+        ok = force_unlock(confirmation)
+        if ok:
+            ip = request.client.host if request.client else ""
+            db.insert_audit_log("admin", "protection_force_unlock", None, {}, ip, "")
+            return {"ok": True, "message": "보호 모드 해제됨"}
+        return {"ok": False, "message": "confirmation 'I_UNDERSTAND_THE_RISK' 입력 필요"}
+    except ImportError:
+        return {"ok": False, "message": "protection_mode 모듈 없음"}
 
 
 @router.post("/strategy_toggle")
