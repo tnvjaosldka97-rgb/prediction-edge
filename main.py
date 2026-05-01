@@ -852,6 +852,34 @@ async def main():
         name="db_health"
     ))
 
+    # Day 19: 벤치마크 추적 (24h)
+    from core.benchmark import benchmark_loop
+    tasks.append(asyncio.create_task(
+        benchmark_loop(interval_sec=86400),
+        name="benchmark"
+    ))
+
+    # Day 19: regime detection (6h)
+    from core.regime import regime_loop
+    tasks.append(asyncio.create_task(
+        regime_loop(interval_sec=21600),
+        name="regime"
+    ))
+
+    # Day 19: 동적 상관 (1h)
+    from core.correlation_live import correlation_loop
+    tasks.append(asyncio.create_task(
+        correlation_loop(interval_sec=3600),
+        name="correlation"
+    ))
+
+    # Day 19: Look-ahead 감사 (매주)
+    from core.lookahead_audit import lookahead_audit_loop
+    tasks.append(asyncio.create_task(
+        lookahead_audit_loop(interval_sec=7 * 86400),
+        name="lookahead_audit"
+    ))
+
     # Shadow-Live mark-to-market loop: every 15 min, check resolved markets
     # and update virtual_trades with realized PnL. Runs only in DRY_RUN
     # since shadow data is only recorded in DRY_RUN path.
