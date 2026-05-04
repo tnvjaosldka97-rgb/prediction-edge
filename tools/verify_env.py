@@ -154,9 +154,9 @@ def check_clob_creds(env: dict) -> bool:
         print("  SKIP: PRIVATE_KEY 없음")
         return False
     try:
-        from py_clob_client.client import ClobClient
+        from py_clob_client_v2 import ClobClient
         client = ClobClient("https://clob.polymarket.com", key=pk, chain_id=137)
-        api_creds = client.create_or_derive_api_creds()
+        api_creds = client.create_or_derive_api_key()
         # 키 일부만 마스킹해서 표시
         api_key = api_creds.api_key
         masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"

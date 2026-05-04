@@ -21,9 +21,14 @@ METACULUS_HOST = "https://www.metaculus.com/api2"
 # ── Polygon / on-chain ───────────────────────────────────────────────────────
 POLYGON_RPC          = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
 POLYGON_CHAIN_ID     = 137
-# Polymarket CTF Exchange contract on Polygon
-CTF_EXCHANGE_ADDRESS = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-POLYMARKET_NEG_RISK  = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+# Polymarket CTF Exchange contract on Polygon — V2 cutover 2026-04-28.
+# V1 주소(0x4bFb41d5...8982E, 0xC5d563A3...0f80a)는 4/28 이후 비활성.
+CTF_EXCHANGE_ADDRESS = "0xE111180000d2663C0091e4f400237545B87B996B"
+POLYMARKET_NEG_RISK  = "0xe2222d279d744050d28e00520010520000310F59"
+# pUSD = V2 collateral. native USDC가 첫 거래 시 1:1 자동 변환됨.
+POLYMARKET_COLLATERAL = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+# USDC native (Circle, Polygon) — Bybit 등 거래소 출금 시 들어오는 것
+USDC_NATIVE_ADDRESS  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 
 # ── Wallet ───────────────────────────────────────────────────────────────────
 PRIVATE_KEY    = os.getenv("PRIVATE_KEY", "")

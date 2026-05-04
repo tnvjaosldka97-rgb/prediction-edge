@@ -5,5 +5,5 @@ aiohttp
 fastapi
 uvicorn
 rich
-py-clob-client
+py-clob-client-v2
 cryptography

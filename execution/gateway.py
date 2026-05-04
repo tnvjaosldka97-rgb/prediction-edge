@@ -72,8 +72,7 @@ class ExecutionGateway:
         if not config.PRIVATE_KEY:
             return
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            from py_clob_client_v2 import ClobClient, ApiCreds
 
             if config.API_KEY and config.API_SECRET and config.API_PASSPHRASE:
                 # Use stored creds
@@ -124,15 +123,13 @@ class ExecutionGateway:
                 # L2 creds rejected — try to derive fresh ones from private key
                 log.warning("[Gateway] L2 creds invalid — attempting to derive fresh credentials from private key...")
                 try:
-                    from py_clob_client.client import ClobClient
+                    from py_clob_client_v2 import ClobClient, ApiCreds
                     fresh = ClobClient(
                         host=config.CLOB_HOST,
                         chain_id=config.POLYGON_CHAIN_ID,
                         key=config.PRIVATE_KEY,
                     )
-                    creds = fresh.create_or_derive_api_creds()
-                    # Re-init with fresh creds
-                    from py_clob_client.clob_types import ApiCreds
+                    creds = fresh.create_or_derive_api_key()
                     self._clob_client = ClobClient(
                         host=config.CLOB_HOST,
                         chain_id=config.POLYGON_CHAIN_ID,
@@ -342,7 +339,7 @@ class ExecutionGateway:
             return await self._submit_live(order, signal)
 
         try:
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client_v2 import OrderArgs
             args = OrderArgs(
                 token_id=order.token_id,
                 price=order.price,
@@ -523,7 +520,7 @@ class ExecutionGateway:
 
         for attempt in range(3):
             try:
-                from py_clob_client.clob_types import OrderArgs
+                from py_clob_client_v2 import OrderArgs
                 args = OrderArgs(
                     token_id=order.token_id,
                     price=order.price,
@@ -693,7 +690,7 @@ class ExecutionGateway:
             return None, None
 
         try:
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client_v2 import OrderArgs
             args = OrderArgs(
                 token_id=order.token_id,
                 price=order.price,
@@ -744,7 +741,8 @@ class ExecutionGateway:
             return False
 
         try:
-            self._clob_client.cancel({"orderID": order_id})
+            from py_clob_client_v2 import OrderPayload
+            self._clob_client.cancel_order(OrderPayload(orderID=order_id))
             return True
         except Exception as e:
             log.debug(f"Cancel {order_id[:12]} failed: {e}")
