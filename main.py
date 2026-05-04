@@ -19,7 +19,16 @@ Architecture:
 """
 import asyncio
 import os
+import sys
 import time
+from dotenv import load_dotenv
+
+# 로컬 인스턴스 잠금 — 운영은 Railway 단독. 같은 지갑·API 키로 중복 실행 시 nonce 충돌·더블 포지션 발생.
+load_dotenv()
+if os.getenv("LOCAL_DISABLED", "").lower() == "true":
+    print("[main.py] LOCAL_DISABLED=true - abort. Production runs on Railway.")
+    sys.exit(0)
+
 from core.db import get_conn
 from core.logger import log
 from core.models import PortfolioState
